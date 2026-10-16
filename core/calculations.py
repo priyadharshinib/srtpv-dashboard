@@ -71,7 +71,10 @@ def inverter_totals(inv: pd.DataFrame) -> pd.DataFrame:
 
 
 def outage_mask(inv: pd.DataFrame) -> pd.Series:
-    """True for days whose total is below OUTAGE_FRACTION of the month median."""
+    """True for days whose total is below OUTAGE_FRACTION of the month median.
+    If the frame already carries an is_outage column (see filters.enrich), use it."""
+    if "is_outage" in inv.columns:
+        return inv["is_outage"].astype(bool)
     return inv["Total"] < inv["Total"].median() * OUTAGE_FRACTION
 
 

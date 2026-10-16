@@ -26,3 +26,13 @@ OUTAGE_FRACTION = 0.20        # day total below 20% of month median -> outage da
 CELL_FLAG_FRACTION = 0.50     # inverter below 50% of that day's median inverter -> flagged cell
 LOW_INVERTER_RATIO = 0.60     # inverter month total below 60% of the others' average -> chronic low
 TOTAL_MISMATCH_KWH = 0.5      # tolerance when checking the sheet's Total column
+
+# Productivity bands: daily specific yield = inverter kWh / plant kWp
+# (name, from, to) in kWh per kWp per day
+PRODUCTIVITY_BANDS = [
+    ("Very low", 0.0, 1.0),
+    ("Low", 1.0, 3.0),
+    ("Normal", 3.0, 4.5),
+    ("High", 4.5, float("inf")),
+]
+WEATHER_GROUPS = ["Sunny", "Partly cloudy", "Cloudy", "Rain / storm", "Not recorded"]

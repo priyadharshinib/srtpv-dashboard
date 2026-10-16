@@ -10,3 +10,6 @@ alter default privileges in schema solar grant select on tables to grafana_reade
 
 -- Check: should list 5 tables
 select table_name from information_schema.tables where table_schema = 'solar';
+
+-- Keep login emails out of Grafana (run again after the app_users table exists)
+revoke select on solar.app_users from grafana_reader;

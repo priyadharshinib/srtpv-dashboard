@@ -91,6 +91,14 @@ class MonthNote(Base):
     text: Mapped[str] = mapped_column(Text, default="")
 
 
+class AppUser(Base):
+    """Who may use the app and with which role. The login itself lives in Supabase Auth."""
+    __tablename__ = "app_users"
+    email: Mapped[str] = mapped_column(String(255), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), default="")
+    role: Mapped[str] = mapped_column(String(20), default="customer")
+
+
 def init_db() -> None:
     if IS_POSTGRES:
         with engine.begin() as conn:
@@ -162,8 +170,18 @@ def available_months() -> list[str]:
     return sorted({d.strftime("%Y-%m") for d in dates}, reverse=True)
 
 
+def data_bounds() -> tuple[dt.date, dt.date] | None:
+    with Session(engine) as s:
+        first = s.scalar(select(InverterReading.date).order_by(InverterReading.date).limit(1))
+        last = s.scalar(select(InverterReading.date).order_by(InverterReading.date.desc()).limit(1))
+    return (first, last) if first else None
+
+
 def load_month(month: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    start, end = _month_range(month)
+    return load_range(*_month_range(month))
+
+
+def load_range(start: dt.date, end: dt.date) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     with Session(engine) as s:
         readings = s.execute(
             select(InverterReading.date, InverterReading.inverter, InverterReading.kwh)
@@ -207,3 +225,28 @@ def load_note(month: str) -> str:
     with Session(engine) as s:
         note = s.get(MonthNote, month)
     return note.text if note else ""
+
+
+# ---------- user access ----------
+
+def get_user_role(email: str) -> str | None:
+    with Session(engine) as s:
+        u = s.get(AppUser, email.lower())
+    return u.role if u else None
+
+
+def list_users() -> pd.DataFrame:
+    with Session(engine) as s:
+        rows = s.scalars(select(AppUser).order_by(AppUser.role, AppUser.email)).all()
+    return pd.DataFrame([{"email": u.email, "name": u.name, "role": u.role} for u in rows],
+                        columns=["email", "name", "role"])
+
+
+def save_user(email: str, name: str, role: str) -> None:
+    with Session(engine) as s, s.begin():
+        s.merge(AppUser(email=email.strip().lower(), name=name.strip(), role=role))
+
+
+def remove_user(email: str) -> None:
+    with Session(engine) as s, s.begin():
+        s.execute(delete(AppUser).where(AppUser.email == email.lower()))

@@ -64,6 +64,15 @@ def _to_numeric(df: pd.DataFrame, cols: list[str], errors: list[str]) -> None:
         df[c] = converted
 
 
+def _check_blanks(df: pd.DataFrame, cols: list[str], date_col: str, errors: list[str]) -> None:
+    """Required numbers must not be empty (pandas also reads 'n/a', 'NA', '-' style text as empty)."""
+    for c in cols:
+        blank = df[c].isna()
+        if blank.any():
+            when = [d.strftime("%d %b") if pd.notna(d) else "?" for d in df.loc[blank, date_col]]
+            errors.append(f"Column {c}: blank or non-numeric value on {when}")
+
+
 def _check_dates(df: pd.DataFrame, col: str, errors: list[str]) -> None:
     df[col] = _parse_dates(df[col])
     if df[col].isna().any():
@@ -84,6 +93,7 @@ def import_inverter(file) -> ImportResult:
     df = df.dropna(subset=["date"]).copy()
     _check_dates(df, "date", res.errors)
     _to_numeric(df, INVERTER_IDS, res.errors)
+    _check_blanks(df, INVERTER_IDS, "date", res.errors)
     for opt in ("temp_c", "wind_ms"):
         if opt in df.columns:
             _to_numeric(df, [opt], res.errors)
@@ -134,6 +144,7 @@ def import_lt_meter(file) -> ImportResult:
     _check_dates(df, "from_date", res.errors)
     _check_dates(df, "to_date", res.errors)
     _to_numeric(df, ["opening", "closing"], res.errors)
+    _check_blanks(df, ["opening", "closing"], "from_date", res.errors)
     if res.errors:
         return res
 
@@ -198,6 +209,7 @@ def import_ht_meter(file) -> ImportResult:
     df = df.dropna(subset=["date"]).copy()
     _check_dates(df, "date", res.errors)
     _to_numeric(df, ["import_kwh", "export_kwh"], res.errors)
+    _check_blanks(df, ["import_kwh", "export_kwh"], "date", res.errors)
     if ((df["import_kwh"] < 0) | (df["export_kwh"] < 0)).any():
         res.errors.append("Negative import/export values")
     dupes = df.loc[df["date"].duplicated(), "date"]

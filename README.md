@@ -45,3 +45,20 @@ Dates can be 2026-10-01, 01-10-2026 or Excel dates. Re-importing a date replaces
 
 Online, tables live in the `solar` schema (not `public`), so Supabase's public
 Data API can't read them.
+
+## Logins and roles
+
+Logins use Supabase Auth (email + password). Roles are kept in `solar.app_users`:
+
+- **admin**: Report, Import data and User access tabs; edits monthly notes
+- **customer**: report only, with filters and Excel download
+
+Emails in the `ADMIN_EMAILS` secret are always admin. Create each person in
+Supabase (Authentication > Users > Add user, auto-confirm), then give their email
+a role in the app's User access tab. A login with no role gets no access.
+
+## Filters (sidebar)
+
+Month or any date range · weather group · productivity band (kWh per kWp per day,
+bands in core/config.py) · weekday/weekend · which inverters to show.
+Outage days are judged on the whole loaded period, so filtering doesn't change them.

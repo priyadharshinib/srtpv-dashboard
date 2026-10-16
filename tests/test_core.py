@@ -102,3 +102,43 @@ def test_lt_closing_below_opening_rejected():
 def test_ht_net_computed():
     res = import_ht_meter(csv("date,import_kwh,export_kwh\n2026-10-04,6366,714\n"))
     assert res.ok and res.df.loc[0, "net_import_kwh"] == 5652
+
+
+def test_blank_or_na_inverter_value_rejected():
+    res = import_inverter(csv(INV_HEADER + "2026-10-01,1,1,1,1,n/a,1,1,1,1,9\n"))
+    assert not res.ok and any("PV5" in e for e in res.errors)
+
+
+# ---------- filters ----------
+
+from core.filters import apply_filters, enrich, productivity_band, weather_group
+
+
+def test_weather_groups():
+    assert weather_group("Overcast / Patchy Rain") == "Rain / storm"
+    assert weather_group("Partly Cloudy / Mostly Cloudy") == "Partly cloudy"
+    assert weather_group("Sunny / Hazy") == "Sunny"
+    assert weather_group("Mostly Cloudy") == "Cloudy"
+    assert weather_group("") == "Not recorded"
+
+
+def test_productivity_bands():
+    assert productivity_band(0.3) == "Very low"
+    assert productivity_band(3.0) == "Normal"
+    assert productivity_band(5.2) == "High"
+
+
+def test_outage_survives_filtering(sample):
+    inv, lt, ht = sample
+    e = enrich(inv)
+    f_inv, _, _ = apply_filters(e, lt, ht, productivity=["Very low"])
+    assert f_inv["is_outage"].tolist() == [True]          # 11 Oct only
+
+
+def test_lt_period_kept_only_if_all_days_kept(sample):
+    inv, lt, ht = sample
+    e = enrich(inv)
+    _, f_lt, f_ht = apply_filters(e, lt, ht, start=pd.Timestamp("2026-10-02"), end=pd.Timestamp("2026-10-05"))
+    assert "01–02 Oct" not in f_lt["period"].tolist()     # 01 Oct filtered out
+    assert f_lt["period"].tolist() == ["03 Oct", "04 Oct", "05 Oct"]
+    assert len(f_ht) == 4
