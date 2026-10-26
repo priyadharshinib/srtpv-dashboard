@@ -81,3 +81,61 @@ def grid_exchange(ht: pd.DataFrame) -> go.Figure:
     fig.add_bar(x=x, y=ht["export_kwh"], name="Export", marker_color=PURPLE,
                 hovertemplate="Export %{y:,.0f} kWh<extra></extra>", row=2, col=1)
     return _layout(fig, 360)
+
+
+GREY = "#9D9D9D"
+
+
+def ac_loss_chart(losses: pd.DataFrame) -> go.Figure:
+    """Loss % per LT period, coloured by status, with the expected band shaded."""
+    from core.config import AC_LOSS_EXPECTED
+
+    colour = {"Normal": TEAL, "Below expected": BLUE, "High loss: check AC side": ORANGE,
+              "LT higher: inverter data gap": GREY}
+    fig = go.Figure(go.Bar(
+        x=losses["period"], y=losses["loss_pct"] * 100,
+        marker_color=[colour.get(s, BLUE) for s in losses["status"]],
+        customdata=losses[["inverter_kwh", "lt_kwh", "loss_kwh", "status"]],
+        hovertemplate=("Inverters %{customdata[0]:,.0f} kWh<br>LT meter %{customdata[1]:,.0f} kWh<br>"
+                       "Loss %{customdata[2]:,.0f} kWh (%{y:.1f}%)<br>%{customdata[3]}<extra></extra>"),
+    ))
+    lo, hi = AC_LOSS_EXPECTED
+    fig.add_hrect(y0=lo * 100, y1=hi * 100, fillcolor=TEAL, opacity=0.12, line_width=0,
+                  annotation_text="expected", annotation_position="top left")
+    fig = _layout(fig, 320)
+    fig.update_yaxes(title="Loss %", tickformat=".0f", zeroline=True, zerolinecolor="rgba(128,128,128,0.6)")
+    fig.update_layout(hovermode="closest")
+    return fig
+
+
+def power_factor_chart(ht: pd.DataFrame) -> go.Figure:
+    from core.config import PF_LIMIT
+
+    d = ht.dropna(subset=["power_factor"])
+    fig = go.Figure(go.Scatter(
+        x=d["date"].dt.strftime("%d %b"), y=d["power_factor"], mode="lines+markers", name="Power factor",
+        line=dict(color=BLUE, width=2),
+        marker=dict(size=7, color=[RED if v < PF_LIMIT else BLUE for v in d["power_factor"]]),
+        hovertemplate="PF %{y:.3f}<extra></extra>",
+    ))
+    fig.add_hline(y=PF_LIMIT, line_dash="dash", line_color=RED,
+                  annotation_text=f"limit {PF_LIMIT:.2f}", annotation_position="bottom right")
+    fig = _layout(fig, 280)
+    fig.update_yaxes(tickformat=".2f", range=[min(0.8, float(d["power_factor"].min()) - 0.02), 1.0])
+    return fig
+
+
+def customer_daily(inv: pd.DataFrame) -> go.Figure:
+    """Average output per inverter per day, with weather under each date."""
+    from core.config import INVERTER_IDS
+
+    avg = inv["Total"] / len(INVERTER_IDS)
+    labels = [f"{d:%d}<br>{weather_icon(w)}" for d, w in zip(inv["date"], inv["weather"])]
+    fig = go.Figure(go.Bar(
+        x=labels, y=avg, marker_color=BLUE, name="Average per inverter",
+        customdata=inv[["weather"]],
+        hovertemplate="%{y:,.0f} kWh per inverter · %{customdata[0]}<extra></extra>",
+    ))
+    fig.add_hline(y=float(avg.mean()), line_dash="dot", line_color=ORANGE,
+                  annotation_text=f"period average {avg.mean():,.0f} kWh", annotation_position="top left")
+    return _layout(fig, 340)

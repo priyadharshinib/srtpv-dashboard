@@ -21,7 +21,7 @@ Click **Load October 2026 sample** in the sidebar to see the report immediately.
 |---|---|---|
 | Inverter | date, PV1 … PV9 | Total (checked), temp_c, weather, wind_ms |
 | LT meter | from_date, to_date, opening, closing | kwh (checked against units × 300), period, note |
-| HT meter | date, import_kwh, export_kwh (or import_units, export_units × 6000) | note |
+| HT meter | date, import_kwh, export_kwh (or import_units, export_units × 6000) | power_factor (0–1, also accepts pf), note |
 
 Dates can be 2026-10-01, 01-10-2026 or Excel dates. Re-importing a date replaces it.
 
@@ -50,8 +50,12 @@ Data API can't read them.
 
 Logins use Supabase Auth (email + password). Roles are kept in `solar.app_users`:
 
-- **admin**: Report, Import data and User access tabs; edits monthly notes
-- **customer**: report only, with filters and Excel download
+- **admin** (backend user): full report incl. AC loss inverters→LT meter, EB import/export,
+  power factor, observations; Import data and User access tabs; edits notes
+- **site_manager**: KPI summary, daily chart, inverter readings, LT/HT meter readings
+  with power factor, daily statement, download; Import data tab; reads notes
+- **customer**: averages only: average daily generation, average per inverter,
+  average yield, solar share, averages by weather; summary download
 
 Emails in the `ADMIN_EMAILS` secret are always admin. Create each person in
 Supabase (Authentication > Users > Add user, auto-confirm), then give their email

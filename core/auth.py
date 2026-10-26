@@ -1,8 +1,9 @@
 """Login with Supabase Auth (email + password) and app roles.
 
 Roles:
-  admin    - import data, manage user access, edit notes
-  customer - view reports, use filters, download
+  admin         - backend user: full report, losses, EB/PF, import data, manage users, edit notes
+  site_manager  - readings and summarised data; imports data (no analysis, no user management)
+  customer      - averages only (average of all inverters, average daily figures)
 Anyone who can log in to Supabase but has no role gets no access.
 """
 from __future__ import annotations
@@ -12,7 +13,12 @@ import requests
 from core import db
 from core.settings import get_setting
 
-ROLES = ["admin", "customer"]
+ROLES = ["admin", "site_manager", "customer"]
+ROLE_LABELS = {
+    "admin": "Backend user (full access)",
+    "site_manager": "Site manager (readings, summary, import)",
+    "customer": "Customer (averages)",
+}
 
 
 class AuthError(Exception):

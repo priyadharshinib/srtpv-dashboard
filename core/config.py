@@ -36,3 +36,8 @@ PRODUCTIVITY_BANDS = [
     ("High", 4.5, float("inf")),
 ]
 WEATHER_GROUPS = ["Sunny", "Partly cloudy", "Cloudy", "Rain / storm", "Not recorded"]
+
+# AC loss between inverters and the LT meter (inverter kWh - LT kWh)
+AC_LOSS_EXPECTED = (0.01, 0.04)   # 1-4% is normal for cables, transformer-less AC run and panel losses
+# Power factor at the HT / EB meter
+PF_LIMIT = 0.90                   # days below this are flagged (check your tariff's PF limit)

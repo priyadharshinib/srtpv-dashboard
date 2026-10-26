@@ -81,6 +81,7 @@ class HtMeterDaily(Base):
     import_kwh: Mapped[float] = mapped_column(Float)
     export_kwh: Mapped[float] = mapped_column(Float)
     net_import_kwh: Mapped[float] = mapped_column(Float)
+    power_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
 
 
@@ -106,6 +107,20 @@ def init_db() -> None:
     else:
         (ROOT / "data").mkdir(exist_ok=True)
     Base.metadata.create_all(engine)
+    _migrate()
+
+
+def _migrate() -> None:
+    """Add columns introduced after the first release to existing tables."""
+    if IS_POSTGRES:
+        with engine.begin() as conn:
+            conn.execute(text(f'ALTER TABLE "{DB_SCHEMA}".ht_meter_daily '
+                              'ADD COLUMN IF NOT EXISTS power_factor double precision'))
+    else:
+        with engine.begin() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(ht_meter_daily)"))]
+            if "power_factor" not in cols:
+                conn.execute(text("ALTER TABLE ht_meter_daily ADD COLUMN power_factor FLOAT"))
 
 
 def database_label() -> str:
@@ -148,7 +163,8 @@ def save_ht(ht: pd.DataFrame) -> None:
         for _, r in ht.iterrows():
             s.add(HtMeterDaily(date=r["date"].date(), import_kwh=float(r["import_kwh"]),
                                export_kwh=float(r["export_kwh"]),
-                               net_import_kwh=float(r["net_import_kwh"]), note=r["note"]))
+                               net_import_kwh=float(r["net_import_kwh"]),
+                               power_factor=_nan_to_none(r.get("power_factor")), note=r["note"]))
 
 
 def save_note(month: str, text: str) -> None:
@@ -215,8 +231,9 @@ def load_range(start: dt.date, end: dt.date) -> tuple[pd.DataFrame, pd.DataFrame
 
     ht = pd.DataFrame([{
         "date": pd.Timestamp(r.date), "day": r.date.strftime("%a"), "import_kwh": r.import_kwh,
-        "export_kwh": r.export_kwh, "net_import_kwh": r.net_import_kwh, "note": r.note,
-    } for r in ht_rows], columns=["date", "day", "import_kwh", "export_kwh", "net_import_kwh", "note"])
+        "export_kwh": r.export_kwh, "net_import_kwh": r.net_import_kwh,
+        "power_factor": r.power_factor, "note": r.note,
+    } for r in ht_rows], columns=["date", "day", "import_kwh", "export_kwh", "net_import_kwh", "power_factor", "note"])
 
     return inv.reset_index(drop=True), lt, ht
 

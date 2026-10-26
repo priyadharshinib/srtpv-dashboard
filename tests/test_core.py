@@ -142,3 +142,43 @@ def test_lt_period_kept_only_if_all_days_kept(sample):
     assert "01–02 Oct" not in f_lt["period"].tolist()     # 01 Oct filtered out
     assert f_lt["period"].tolist() == ["03 Oct", "04 Oct", "05 Oct"]
     assert len(f_ht) == 4
+
+
+# ---------- AC loss, EB / power factor, customer averages ----------
+
+from core.calculations import ac_loss_totals, ac_losses, customer_averages, grid_summary
+
+
+def test_ac_loss_normal_days_and_gaps(sample):
+    inv, lt, _ = sample
+    losses = ac_losses(inv, lt).set_index("period")
+    assert losses.loc["03 Oct", "loss_kwh"] == pytest.approx(177.71, abs=0.01)
+    assert losses.loc["03 Oct", "status"] == "Normal"
+    assert losses.loc["13 Oct", "status"] == "LT higher: inverter data gap"
+    t = ac_loss_totals(ac_losses(inv, lt))
+    assert t["gap_periods"] == 3
+    assert 0.03 < t["clean_loss_pct"] < 0.04
+
+
+def test_grid_summary_without_pf(sample):
+    inv, lt, ht = sample
+    g = grid_summary(ht, lt)
+    assert g["eb_import_kwh"] == 118908 and g["export_kwh"] == 1872
+    assert g["pf_avg"] is None
+
+
+def test_power_factor_import_and_flag():
+    res = import_ht_meter(csv("date,import_kwh,export_kwh,pf\n2026-10-01,100,0,0.95\n2026-10-02,100,0,0.86\n"))
+    assert res.ok
+    g = grid_summary(res.df, pd.DataFrame({"kwh": [0.0]}))
+    assert g["pf_min"] == 0.86 and g["pf_low_days"] == ["02 Oct"]
+
+
+def test_power_factor_out_of_range_rejected():
+    assert not import_ht_meter(csv("date,import_kwh,export_kwh,power_factor\n2026-10-01,100,0,1.4\n")).ok
+
+
+def test_customer_averages(sample):
+    a = customer_averages(*sample)
+    assert a["days"] == 13
+    assert a["avg_per_inverter_daily"] == pytest.approx(40617.29 / 13 / 9, abs=0.01)

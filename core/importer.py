@@ -189,7 +189,7 @@ def import_lt_meter(file) -> ImportResult:
 # ---------- HT bi-directional meter ----------
 
 def import_ht_meter(file) -> ImportResult:
-    """Columns: date, import_kwh, export_kwh; optional net_import_kwh, note.
+    """Columns: date, import_kwh, export_kwh; optional net_import_kwh, power_factor, note.
 
     If your sheet has meter display values instead, add columns
     import_units / export_units and they are converted with HT_METER_MF.
@@ -217,13 +217,24 @@ def import_ht_meter(file) -> ImportResult:
         res.errors.append(f"Duplicate dates: {[d.date().isoformat() for d in dupes]}")
 
     df["net_import_kwh"] = df["import_kwh"] - df["export_kwh"]
+    for alias in ("pf", "PF", "Power Factor", "power factor"):
+        if "power_factor" not in df.columns and alias in df.columns:
+            df = df.rename(columns={alias: "power_factor"})
+    if "power_factor" in df.columns:
+        _to_numeric(df, ["power_factor"], res.errors)
+        bad = df["power_factor"].notna() & ((df["power_factor"].abs() > 1) | (df["power_factor"] == 0))
+        if bad.any():
+            res.errors.append(f"power_factor must be between 0 and 1; check {df.loc[bad, 'date'].dt.date.tolist()}")
+        df["power_factor"] = df["power_factor"].abs()
+    else:
+        df["power_factor"] = float("nan")
     df["day"] = df["date"].dt.strftime("%a")
     if "note" not in df.columns:
         df["note"] = ""
     df["note"] = df["note"].fillna("").astype(str)
 
     res.df = df.sort_values("date").reset_index(drop=True)[
-        ["date", "day", "import_kwh", "export_kwh", "net_import_kwh", "note"]
+        ["date", "day", "import_kwh", "export_kwh", "net_import_kwh", "power_factor", "note"]
     ]
     return res
 
