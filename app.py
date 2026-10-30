@@ -41,13 +41,14 @@ from core.config import (
     WEATHER_GROUPS,
 )
 from core.filters import apply_filters, enrich, productivity_summary
-from core.importer import import_ht_meter, import_inverter, import_lt_meter, load_sample
+from core.importer import import_ht_meter, import_inverter, import_lt_meter
 from core.observations import glance_headline, inverter_issues
 from core.report import build_period, daily_headline, followups, month_list, short_weather, very_low_mask
 from core.settings import get_setting
-from core.views import apply_view, views_for  # AVG-VIEW
+from core.views import PROJECTED, apply_view, views_for
+from core.projection import project
 from core.billing import demand_headline, demand_pct, demand_story, inr
-from core.batches import ADD_NEW, REPLACE, coverage_text, prepare_batch
+from core.batches import ADD_NEW, ALL_MONTHS, REPLACE, REPLACE_MONTH, coverage_text, prepare_batch, split_by_month
 from core.config import CONTRACT_DEMAND_KVA, DEFAULT_EXPORT_NOTE
 
 st.set_page_config(page_title=f"{PLANT_NAME} report", page_icon="☀️", layout="wide")
@@ -73,10 +74,22 @@ GRAFANA_URL = get_setting("GRAFANA_URL")
 # =====================================================================
 # Login
 # =====================================================================
+def _logo_html(mark_h: int = 60, word_h: int = 48) -> str:
+    folder = Path(__file__).parent / "assets"
+    imgs = [base64.b64encode((folder / f).read_bytes()).decode() for f in ("logo_mark.png", "logo_word.png")
+            if (folder / f).exists()]
+    if len(imgs) < 2:
+        return ""
+    return (f'<div style="display:flex;justify-content:center;align-items:center;gap:14px;margin:10px 0 18px">'
+            f'<img src="data:image/png;base64,{imgs[0]}" height="{mark_h}">'
+            f'<img src="data:image/png;base64,{imgs[1]}" height="{word_h}"></div>')
+
+
 def login_page() -> None:
     _, mid, _ = st.columns([1, 1.2, 1])
     with mid:
-        st.title("☀️ " + PLANT_NAME)
+        st.markdown(_logo_html(), unsafe_allow_html=True)
+        st.title(PLANT_NAME)
         st.caption(f"{PLANT_CAPACITY_KWP} kWp rooftop solar · generation and grid reports")
         with st.form("login"):
             email = st.text_input("Email")
@@ -174,22 +187,31 @@ def bill_form() -> None:
                 st.success(f"Bill saved for {pd.Timestamp(month_sel + '-01'):%B %Y}")
 
 
+def _month_label(m: str) -> str:
+    return "All months in the file" if m == ALL_MONTHS else pd.Timestamp(m + "-01").strftime("%B %Y")
+
+
+def _coverage_md(month: str) -> str:
+    cov = coverage_text(month, db.coverage(month))
+    return (f"**{_month_label(month)}:** Inverter: {cov['inverter']}  \nLT meter: {cov['lt']}  \n"
+            f"HT meter: {cov['ht']}")
+
+
 def import_page() -> None:
     st.subheader("Import data")
-    st.caption("Choose the month the readings belong to. You can import a month in parts, "
-               "for example 01–15 Oct now and 16–31 Oct later; each file is checked first and "
-               "nothing is saved if a check fails.")
+    st.caption("Choose the month the readings belong to, or **All months in the file** for a sheet that "
+               "covers several months. You can import a month in parts (e.g. 01–15 Oct now, 16–31 Oct "
+               "later). Each file is checked first; nothing is saved if a check fails.")
     today = pd.Timestamp.today()
     recent = [p.strftime("%Y-%m") for p in pd.period_range(today - pd.DateOffset(months=11), today, freq="M")]
-    month_opts = sorted(set(recent) | set(db.available_months()), reverse=True)
+    month_opts = [ALL_MONTHS] + sorted(set(recent) | set(db.available_months()), reverse=True)
     m1, m2 = st.columns([1, 2])
-    data_month = m1.selectbox("Data month", month_opts, key="imp_month",
-                              format_func=lambda m: pd.Timestamp(m + "-01").strftime("%B %Y"))
-    mode = m2.radio("If a day is already imported", [ADD_NEW, REPLACE], key="imp_mode")
-
-    cov = coverage_text(data_month, db.coverage(data_month))
-    st.markdown(f"**Already imported for {pd.Timestamp(data_month + '-01'):%B %Y}**  \n"
-                f"Inverter: {cov['inverter']}  \nLT meter: {cov['lt']}  \nHT meter: {cov['ht']}")
+    data_month = m1.selectbox("Data month", month_opts, key="imp_month", format_func=_month_label)
+    mode = m2.radio("If a day is already imported", [ADD_NEW, REPLACE, REPLACE_MONTH], key="imp_mode")
+    if data_month != ALL_MONTHS:
+        st.markdown("Already imported — " + _coverage_md(data_month))
+    if mode == REPLACE_MONTH:
+        st.warning("Every month this file covers will be cleared for that sheet type before saving.")
 
     c1, c2, c3 = st.columns(3)
     f_inv = c1.file_uploader("Inverter daily readings (PV1–PV9)", type=["xlsx", "csv"])
@@ -197,11 +219,10 @@ def import_page() -> None:
     f_ht = c3.file_uploader("HT import / export meter", type=["xlsx", "csv"])
 
     if st.button("Validate and save", type="primary", disabled=not (f_inv or f_lt or f_ht)):
-        existing = db.coverage(data_month)
         jobs = [(f_inv, import_inverter, db.save_inverter, "Inverter", "inverter"),
                 (f_lt, import_lt_meter, db.save_lt, "LT meter", "lt"),
                 (f_ht, import_ht_meter, db.save_ht, "HT meter", "ht")]
-        saved_any = False
+        touched = set()
         for file, importer, saver, label, kind in jobs:
             if file is None:
                 continue
@@ -218,30 +239,32 @@ def import_page() -> None:
                     st.error(f"{label}: {err}")
                 db.log_import("app", USER["email"], file.name, label, "refused", 0, "; ".join(res.errors))
                 continue
-            last_close = None
-            if kind == "lt" and len(res.df):
-                last_close = db.lt_closing_before(res.df["from_date"].min().date())
-            df, errors, notes = prepare_batch(kind, res.df, data_month, existing[kind], mode, last_close)
-            for n in notes:
-                st.info(f"{label}: {n}")
-            if errors:
-                for err in errors:
-                    st.error(f"{label}: {err}")
-                db.log_import("app", USER["email"], file.name, label, "refused", 0, "; ".join(errors))
-                continue
-            if df.empty:
-                st.info(f"{label}: nothing new to add; every day in this file is already imported.")
-                db.log_import("app", USER["email"], file.name, label, "skipped", 0, "; ".join(notes))
-                continue
-            saver(df)
-            saved_any = True
-            st.success(f"{label}: {len(df)} row(s) saved to {pd.Timestamp(data_month + '-01'):%B %Y}")
-            db.log_import("app", USER["email"], file.name, label, "saved", len(df),
-                          "; ".join(notes + res.warnings))
-        if saved_any:
-            cov = coverage_text(data_month, db.coverage(data_month))
-            st.markdown(f"**Now imported:** Inverter: {cov['inverter']}  \nLT meter: {cov['lt']}  \n"
-                        f"HT meter: {cov['ht']}")
+            parts = split_by_month(kind, res.df) if data_month == ALL_MONTHS else {data_month: res.df}
+            for m, part in parts.items():
+                tag = f"{label}, {_month_label(m)}"
+                last_close = db.lt_closing_before(part["from_date"].min().date()) if kind == "lt" and len(part) else None
+                df, errors, notes = prepare_batch(kind, part, m, db.coverage(m)[kind], mode, last_close)
+                if errors:
+                    for err in errors:
+                        st.error(f"{tag}: {err}")
+                    db.log_import("app", USER["email"], file.name, label, "refused", 0, "; ".join(errors))
+                    continue
+                if mode == REPLACE_MONTH:
+                    gone = db.clear_month(m, [kind]).get(kind, 0)
+                    notes.insert(0, f"Cleared the month's old {label} data ({gone} record(s))")
+                for n in notes:
+                    st.info(f"{tag}: {n}")
+                if df.empty:
+                    st.info(f"{tag}: nothing new to add; every day is already imported.")
+                    db.log_import("app", USER["email"], file.name, label, "skipped", 0, "; ".join(notes))
+                    continue
+                saver(df)
+                touched.add(m)
+                st.success(f"{tag}: {len(df)} row(s) saved")
+                db.log_import("app", USER["email"], file.name, label, "saved", len(df),
+                              "; ".join(notes + res.warnings))
+        for m in sorted(touched):
+            st.markdown("Now imported — " + _coverage_md(m))
 
     with st.expander("Import history (app, email bot and weather bot)"):
         st.dataframe(db.recent_imports(50), hide_index=True, use_container_width=True)
@@ -249,12 +272,23 @@ def import_page() -> None:
     bill_form()
     if not IS_ADMIN:
         return
-    with st.expander("Tools"):
-        st.caption(f"Database: {db.database_label()}")
-        if st.button("Load October 2026 sample"):
-            inv_s, lt_s, ht_s = load_sample()
-            db.save_inverter(inv_s); db.save_lt(lt_s); db.save_ht(ht_s)
-            st.success("Sample data loaded")
+    with st.expander("Tools: delete a month's data"):
+        st.caption(f"Database: {db.database_label()}. Use this to remove test data or a wrong import. "
+                   "It cannot be undone.")
+        months = db.available_months()
+        if not months:
+            st.info("No data saved yet.")
+            return
+        t1, t2 = st.columns([1, 2])
+        del_month = t1.selectbox("Month", months, key="del_month", format_func=_month_label)
+        names = {"inverter": "Inverter readings and weather", "lt": "LT meter", "ht": "HT meter", "bill": "HT bill"}
+        kinds = t2.multiselect("Delete", list(names), default=["inverter"], format_func=names.get, key="del_kinds")
+        sure = st.checkbox(f"Yes, delete the selected data for {_month_label(del_month)}", key="del_sure")
+        if st.button("Delete", disabled=not (sure and kinds)):
+            gone = db.clear_month(del_month, kinds)
+            st.success("Deleted: " + ", ".join(f"{names[k]} ({n})" for k, n in gone.items()))
+            db.log_import("app", USER["email"], "-", "Delete", "deleted", sum(gone.values()),
+                          f"{del_month}: {', '.join(kinds)}")
 
 
 def users_page() -> None:
@@ -327,41 +361,74 @@ if bounds is None:
     st.stop()
 
 with st.sidebar:
-    VIEWS = views_for(ROLE)  # AVG-VIEW
-    VIEW = (st.radio("Dashboard view", VIEWS, horizontal=True, key="view")  # AVG-VIEW
-            if len(VIEWS) > 1 else VIEWS[0])  # AVG-VIEW
+    VIEWS = views_for(ROLE)
+    VIEW = (st.radio("Dashboard view", VIEWS, horizontal=True, key="view")
+            if len(VIEWS) > 1 else VIEWS[0])
     st.header("Filters")
-    mode = st.radio("Period", ["Month", "Date range"], horizontal=True, key="f_mode")
+
+    # ---- period: month, date range or a single day
+    mode = st.radio("Period", ["Month", "Date range", "Single day"], horizontal=True, key="f_mode")
     if mode == "Month":
         months = db.available_months()
-        month = st.selectbox("Month", months, format_func=lambda m: pd.Timestamp(m + "-01").strftime("%B %Y"), key="f_month")
-        inv_all, lt_all, ht_all = db.load_month(month)
-        start = end = None
-    else:
+        month = st.selectbox("Month", months, format_func=lambda m: pd.Timestamp(m + "-01").strftime("%B %Y"),
+                             key="f_month")
+        P_START = pd.Timestamp(month + "-01")
+        P_END = P_START + pd.offsets.MonthEnd(0)
+    elif mode == "Date range":
         month = None
         picked = st.date_input("From – to", value=(bounds[0], bounds[1]),
                                min_value=bounds[0], max_value=bounds[1], format="DD-MM-YYYY", key="f_range")
         if not isinstance(picked, tuple) or len(picked) != 2:
             st.info("Pick an end date.")
             st.stop()
-        start, end = pd.Timestamp(picked[0]), pd.Timestamp(picked[1])
-        inv_all, lt_all, ht_all = db.load_range(picked[0], picked[1])
+        P_START, P_END = pd.Timestamp(picked[0]), pd.Timestamp(picked[1])
+    else:
+        month = None
+        one = st.date_input("Day", value=bounds[1], min_value=bounds[0], max_value=bounds[1],
+                            format="DD-MM-YYYY", key="f_day")
+        P_START = P_END = pd.Timestamp(one)
 
+    # Whole months are loaded so bill-based daily figures are spread correctly, then cut to the period.
+    L_START = P_START.replace(day=1)
+    L_END = P_END + pd.offsets.MonthEnd(0)
+    inv_all, lt_all, ht_all = db.load_range(L_START.date(), L_END.date())
     if inv_all.empty:
         st.warning("No data in this period.")
         st.stop()
-    inv_all = enrich(inv_all)
 
-    weather_opts = [w for w in WEATHER_GROUPS if w in set(inv_all["weather_group"])]
+    # ---- inverters: the selection drives every inverter figure on the page
+    shown_inverters = st.multiselect("Inverters", INVERTER_IDS, default=INVERTER_IDS,
+                                     format_func=lambda p: f"{p} · {INVERTERS[p]}", key="f_inv")
+    SEL = [p for p in INVERTER_IDS if p in shown_inverters] or INVERTER_IDS
+    ALL_SEL = len(SEL) == len(INVERTER_IDS)
+    RAW_INV = inv_all.copy()                       # actual readings, for the actual-vs-projected table
+    viewed = apply_view(inv_all, VIEW)
+    if not ALL_SEL:
+        viewed["Total"] = viewed[SEL].sum(axis=1, min_count=1).round(2)
+    inv_all = enrich(viewed, PLANT_CAPACITY_KWP * len(SEL) / len(INVERTER_IDS))
+    IN_PERIOD = inv_all[(inv_all["date"] >= P_START) & (inv_all["date"] <= P_END)]
+    if IN_PERIOD.empty:
+        st.warning("No inverter data in this period.")
+        st.stop()
+
+    # ---- weather, performance and day type
+    weather_opts = [w for w in WEATHER_GROUPS if w in set(IN_PERIOD["weather_group"])]
     weather = st.multiselect("Weather", weather_opts, default=weather_opts, key="f_weather")
     band_names = [b[0] for b in PRODUCTIVITY_BANDS]
     band_help = ", ".join(f"{n} {lo:g}–{hi:g}" if hi != float("inf") else f"{n} ≥ {lo:g}"
                           for n, lo, hi in PRODUCTIVITY_BANDS)
-    productivity = st.multiselect("Productivity (kWh per kWp per day)", band_names, default=band_names,
+    productivity = st.multiselect("Performance (kWh per kWp per day)", band_names, default=band_names,
                                   help=band_help, key="f_prod")
     day_types = st.multiselect("Days", ["Weekday", "Weekend"], default=["Weekday", "Weekend"], key="f_days")
-    shown_inverters = st.multiselect("Inverters in table and chart", INVERTER_IDS, default=INVERTER_IDS,
-                                     format_func=lambda p: f"{p} · {INVERTERS[p]}", key="f_inv")
+    HEALTH = "All days"
+    if not IS_CUSTOMER:
+        HEALTH = st.selectbox("Inverter health", ["All days", "Days with a faulty reading",
+                                                  "Days with all readings normal"], key="f_health",
+                              help="Faulty = blank, or below 70% of the other inverters in its group "
+                                   "(selected inverters only).")
+    GROUP = "Day"
+    if len(month_list(P_START, P_END)) > 1:
+        GROUP = st.radio("Show tables per", ["Day", "Month"], horizontal=True, key="f_group")
     if st.button("Reset filters"):
         for k in [k for k in st.session_state if str(k).startswith("f_")]:
             del st.session_state[k]
@@ -370,29 +437,36 @@ with st.sidebar:
 # =====================================================================
 # Period data: bill estimates where a bill has totals, meter readings otherwise
 # =====================================================================
-if month:
-    P_START = pd.Timestamp(month + "-01")
-    P_END = P_START + pd.offsets.MonthEnd(0)
-else:
-    P_START, P_END = start, end
-BILLS = {m: db.load_bill(m) for m in month_list(P_START, P_END)}
-lt_p, ht_p, DAILY_ALL, NODATA, BILL_MONTHS = build_period(inv_all, lt_all, ht_all, BILLS, P_START, P_END)
+BILLS = {m: db.load_bill(m) for m in month_list(L_START, L_END)}
+lt_p, ht_p, DAILY_ALL, NODATA_ALL, BILL_MONTHS = build_period(inv_all, lt_all, ht_all, BILLS, L_START, L_END)
 
-inv, lt, ht = apply_filters(inv_all, lt_p, ht_p, start, end, weather, productivity, day_types)
-filtered = len(inv) < len(inv_all)
+base = inv_all
+if HEALTH != "All days":
+    _, faulty_cells = project(RAW_INV)
+    faulty_days = set(RAW_INV.loc[faulty_cells[SEL].any(axis=1).values, "date"])
+    keep = base["date"].isin(faulty_days)
+    base = base[keep if HEALTH == "Days with a faulty reading" else ~keep]
+inv, lt, ht = apply_filters(base, lt_p, ht_p, P_START, P_END, weather, productivity, day_types)
+N_PERIOD = len(IN_PERIOD)
+filtered = len(inv) < N_PERIOD
+
+
+def _in_period(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    return df[(df[col] >= P_START) & (df[col] <= P_END)].reset_index(drop=True)
+
+
 if not filtered:                       # keep no-data days (e.g. 01 Sep) in LT/HT totals
-    lt, ht = lt_p, ht_p
-    DAILY = DAILY_ALL
+    lt, ht = _in_period(lt_p, "from_date"), _in_period(ht_p, "date")
+    DAILY = _in_period(DAILY_ALL, "date")
+    NODATA = [d for d in NODATA_ALL if P_START <= d <= P_END]
 else:
     DAILY = DAILY_ALL[DAILY_ALL["date"].isin(inv["date"])].reset_index(drop=True)
     NODATA = []
-inv = apply_view(inv, VIEW)  # AVG-VIEW
 
 if inv.empty:
-    st.warning("No days match these filters. Widen the weather, productivity or day filters.")
+    st.warning("No days match these filters. Widen the period, weather, performance or health filters.")
     st.stop()
-if not shown_inverters:
-    shown_inverters = INVERTER_IDS
+shown_inverters = SEL
 
 first, last = inv["date"].min(), inv["date"].max()
 KPIS = headline_kpis(inv, lt, ht)
@@ -400,7 +474,9 @@ GRID = grid_summary(ht, lt)
 BILL = BILLS.get(month) if month else None
 BILL_BASED = bool(month) and month in BILL_MONTHS
 MONTH_NAME = pd.Timestamp(month + "-01").strftime("%B") if month else None
-IS_AVG = VIEW == "Avg"  # AVG-VIEW
+IS_PROJ = VIEW == PROJECTED
+DATA_WORD = "projected" if IS_PROJ else "actual"
+SEL_NOTE = "" if ALL_SEL else " · " + ", ".join(SEL)
 
 
 # =====================================================================
@@ -468,10 +544,10 @@ table.ae-t{border-collapse:collapse;width:100%;font-size:.86rem}
 .ae-t td.i{font-style:italic}.ae-t td.b{font-weight:700}.ae-t td.tot{background:#ECEFF4;font-weight:700}
 .ae-t tr.low td{color:#C0392B}.ae-t tr.lowbg td{background:#FBE6E3}
 .ae-t td.flag{background:#F9E1DE !important;color:#C0392B !important;font-weight:700}
-.ae-t td.est{color:#7D8A97 !important}.ae-t td.est::after{content:" e";font-size:.7em;vertical-align:super}
+.ae-t td.proj{color:#2A6FB0 !important}.ae-t td.proj::after{content:" p";font-size:.7em;vertical-align:super}
 .ae-t tr.total td{background:#E3E7ED;font-weight:700}
 .ae-t td.wx{text-align:left;white-space:normal;min-width:180px}.ae-t th.wx{text-align:left}
-.ae-key{color:#5B6B7B;font-size:.8rem;margin-top:8px}
+.ae-key{color:#5B6B7B;font-size:.8rem;margin-top:8px}.ae-scroll{max-height:560px;overflow:auto;border:1px solid #E3E7ED;border-radius:8px}.ae-scroll .ae-t th{position:sticky;top:0;z-index:2}.ae-scroll .ae-t tr.total td{position:sticky;bottom:0;z-index:1}
 .ae-obs{background:#1C2B3A;color:#fff;border-radius:14px;padding:30px 36px;margin-top:42px}
 .ae-obs h2{font-family:'Source Serif 4',Cambria,Georgia,serif;color:#fff;font-size:2rem;margin:0 0 18px}
 .ae-oi{display:flex;gap:18px;margin:16px 0}.ae-oi b{font-size:1.1rem}.ae-oi div div{color:#C9D2DC;margin-top:4px}
@@ -504,6 +580,8 @@ def _span(a: pd.Timestamp, b: pd.Timestamp) -> str:
 
 
 def _short(a: pd.Timestamp, b: pd.Timestamp) -> str:          # "2–30 Sep" (no leading zero)
+    if a == b:
+        return f"{a.day} {a:%b}"
     return f"{a.day}–{b.day} {b:%b}" if (a.year, a.month) == (b.year, b.month) else _span(a, b)
 
 
@@ -537,7 +615,8 @@ def cover() -> None:
     title = f"{MONTH_NAME} {P_START:%Y} generation and grid report" if month else \
         f"Generation and grid report, {_span(P_START, P_END)} {P_END:%Y}"
     src = (f"LT and HT totals from the {MONTH_NAME} bill" if BILL_BASED else "LT and HT from meter readings")
-    hero = [(f"{KPIS['inverter_kwh']:,.0f}", "kWh from inverters", f"{_short(first, last)}, actual"),
+    hero = [(f"{KPIS['inverter_kwh']:,.0f}", "kWh from inverters" + ("" if ALL_SEL else f" ({', '.join(SEL)})"),
+             f"{_short(first, last)}, {DATA_WORD}"),
             (f"{KPIS['ht_import_kwh']:,.0f}", "kWh imported from grid",
              f"{MONTH_NAME} bill" if BILL_BASED else "HT meter")]
     if BILL and BILL.get("max_demand_kva") and BILL.get("md_at"):
@@ -547,20 +626,20 @@ def cover() -> None:
         hero.append((f"{KPIS['solar_share']:.0%}", "solar share of load", "LT solar ÷ site consumption"))
     st.markdown(
         f'<div class="ae-cover"><h1>{escape(PLANT_NAME)}</h1><div class="sub">{escape(title)}</div>'
-        f'<div class="meta">{PLANT_CAPACITY_KWP} kWp rooftop solar · Inverter data actual · {escape(src)}</div>'
+        f'<div class="meta">{PLANT_CAPACITY_KWP} kWp rooftop solar · Inverter data {DATA_WORD} · {escape(src)}</div>'
         '<div class="ae-hero">' + "".join(
             f'<div><div class="v">{v}</div><div class="l">{l}</div><div class="s">{s}</div></div>' for v, l, s in hero)
         + f'</div><div class="prep">Prepared {pd.Timestamp.today():%d %B %Y}</div></div>', unsafe_allow_html=True)
     if filtered:
-        st.info(f"Filters on: showing **{len(inv)} of {len(inv_all)} days**. Figures cover only these days.")
+        st.info(f"Filters on: showing **{len(inv)} of {N_PERIOD} days**. Figures cover only these days.")
 
 
 def at_a_glance(customer: bool = False) -> None:
     lt_note, ht_note = src_notes()
     h2(f"{MONTH_NAME} at a glance" if month else f"At a glance, {_span(first, last)}",
-       glance_headline(KPIS, inv, "month" if month else "period", include_outages=not customer))
+       glance_headline(KPIS, inv, "month" if month else "period", include_outages=not customer, only=SEL))
     cards_html = [
-        card("panel", "amber", f"{KPIS['inverter_kwh']:,.0f}", "Inverter generation", f"kWh · actual · {_short(first, last)}"),
+        card("panel", "amber", f"{KPIS['inverter_kwh']:,.0f}", "Inverter generation", (f"kWh · {_short(first, last)}{SEL_NOTE}" if IS_CUSTOMER else f"kWh · {DATA_WORD} · {_short(first, last)}{SEL_NOTE}")),
         card("gauge", "teal", f"{KPIS['lt_kwh']:,.0f}", "LT meter generation", lt_note),
         card("down", "navy", f"{KPIS['ht_import_kwh']:,.0f}", "HT grid import", ht_note),
         card("up", "coral", f"{KPIS['ht_export_kwh']:,.0f}", "HT grid export", ht_note),
@@ -627,11 +706,16 @@ def daily_generation() -> None:
 
 
 def inverter_vs_lt() -> None:
+    if not ALL_SEL:
+        h2("Inverter vs LT meter")
+        st.info("The LT meter measures all nine inverters together, so this comparison is shown only "
+                "when all inverters are selected.")
+        return
     lt_est = BILL_BASED
     h2("Inverter vs LT meter")
     c1, c2 = st.columns([2.2, 1])
     with c1:
-        st.plotly_chart(charts.inverter_vs_lt_chart(DAILY, lt_est), use_container_width=True)
+        st.plotly_chart(charts.inverter_vs_lt_chart(DAILY, lt_est, f"Inverter ({DATA_WORD})"), use_container_width=True)
     ratio = KPIS["lt_kwh"] / KPIS["inverter_kwh"] if KPIS["inverter_kwh"] else float("nan")
     nod_txt = (f" {', '.join(f'{d:%d %b}' for d in NODATA)} has no inverter data, so the true ratio is slightly lower."
                if NODATA else "")
@@ -652,30 +736,53 @@ def inverter_vs_lt() -> None:
         st.markdown('<div class="ae-side">' + "".join(side) + "</div>", unsafe_allow_html=True)
 
 
-def _inv_table_html(rows: pd.DataFrame, cols: list[str], with_total: bool) -> str:
-    vmax = float(inv[INVERTER_IDS].to_numpy().max() or 1)
-    flags = flagged_cells(inv)
-    low = very_low_mask(inv["Total"])
-    head = "".join(f"<th>{c}</th>" for c in ["Date", "Day", *cols, "Total"])
+def _month_rows(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Daily rows -> one row per month (sums), for 'Show tables per: Month'."""
+    g = df.groupby(df["date"].dt.to_period("M"))
+    out = g[cols].sum(min_count=1)
+    out["days"] = g.size()
+    out = out.reset_index()
+    out["label"] = out["date"].dt.strftime("%B %Y")
+    return out
+
+
+def _inv_table_html(cols: list[str]) -> str:
+    """One scrollable table for the whole period (header and total row stay in view)."""
+    by_month = GROUP == "Month"
+    head = "".join(f"<th>{c}</th>" for c in (["Month", "Days"] if by_month else ["Date", "Day"]) + cols + ["Total"])
     body = []
-    for i, r in rows.iterrows():
-        cls = "low" if low[i] else ""
-        tds = [f'<td class="b">{r["date"]:%d %b}</td>', f"<td>{r['day']}</td>"]
-        for p in cols:
-            v = r[p]
-            if flags.at[i, p] and not IS_AVG:
-                tds.append(f'<td class="i flag">{v:,.2f}</td>')
-                continue
-            est = " est" if bool(r.get(f"est_{p}", False)) else ""
-            tds.append(f'<td class="i{est}" style="background:rgba(229,160,26,{0.10 + 0.32 * v / vmax:.2f})">{v:,.2f}</td>')
-        tds.append(f'<td class="tot">{r["Total"]:,.2f}</td>')
-        body.append(f'<tr class="{cls}">' + "".join(tds) + "</tr>")
-    if with_total:
-        sums = inv[[*cols, "Total"]].sum()
-        body.append(f'<tr class="total"><td colspan="2">Total {_short(first, last)}</td>'
-                    + "".join(f'<td class="i">{sums[c]:,.2f}</td>' for c in cols)
-                    + f'<td>{sums["Total"]:,.2f}</td></tr>')
-    return f'<div class="ae-tw"><table class="ae-t"><tr>{head}</tr>{"".join(body)}</table></div>'
+    if by_month:
+        m = _month_rows(inv, [*cols, "Total"])
+        vmax = float(m[cols].to_numpy().max() or 1)
+        for _, r in m.iterrows():
+            body.append(f'<tr><td class="b">{r["label"]}</td><td>{int(r["days"])}</td>'
+                        + "".join(f'<td class="i" style="background:rgba(229,160,26,{0.10 + 0.32 * (r[p] or 0) / vmax:.2f})">'
+                                  f'{"—" if pd.isna(r[p]) else f"{r[p]:,.2f}"}</td>' for p in cols)
+                        + f'<td class="tot">{r["Total"]:,.2f}</td></tr>')
+    else:
+        vmax = float(inv[cols].to_numpy(dtype=float, na_value=0).max() or 1)
+        flags = flagged_cells(inv)
+        low = very_low_mask(inv["Total"])
+        multi_year = first.year != last.year
+        for i, r in inv.iterrows():
+            tds = [f'<td class="b">{r["date"]:%d %b %Y}</td>' if multi_year else f'<td class="b">{r["date"]:%d %b}</td>',
+                   f"<td>{r['day']}</td>"]
+            for p in cols:
+                v = r[p]
+                if pd.isna(v):
+                    tds.append('<td class="i">—</td>')
+                elif flags.at[i, p] and not IS_PROJ and not IS_CUSTOMER:
+                    tds.append(f'<td class="i flag">{v:,.2f}</td>')
+                else:
+                    mark = " proj" if (IS_PROJ and not IS_CUSTOMER and bool(r.get(f"proj_{p}", False))) else ""
+                    tds.append(f'<td class="i{mark}" style="background:rgba(229,160,26,{0.10 + 0.32 * v / vmax:.2f})">'
+                               f"{v:,.2f}</td>")
+            tds.append(f'<td class="tot">{"—" if pd.isna(r["Total"]) else f"{r["Total"]:,.2f}"}</td>')
+            body.append(f'<tr class="{"low" if low[i] else ""}">' + "".join(tds) + "</tr>")
+    sums = inv[[*cols, "Total"]].sum()
+    body.append(f'<tr class="total"><td colspan="2">Total {_short(first, last)}</td>'
+                + "".join(f'<td class="i">{sums[c]:,.2f}</td>' for c in cols) + f'<td>{sums["Total"]:,.2f}</td></tr>')
+    return f'<div class="ae-scroll"><table class="ae-t"><tr>{head}</tr>{"".join(body)}</table></div>'
 
 
 def _roof_key() -> str:
@@ -688,19 +795,15 @@ def _roof_key() -> str:
 
 def inverter_readings() -> None:
     cols = shown_inverters
-    halves = [inv[inv["date"].dt.day <= 15], inv[inv["date"].dt.day > 15]] if month else [inv]
-    halves = [h for h in halves if len(h)]
-    any_est = (not IS_AVG) and any(inv[f"est_{p}"].any() for p in cols if f"est_{p}" in inv)
-    for n, part in enumerate(halves):
-        h2(f"Inverter-wise readings, {_span(part['date'].min(), part['date'].max())}")
-        st.markdown(_inv_table_html(part, cols, with_total=(n == len(halves) - 1)), unsafe_allow_html=True)
-        key = _roof_key()
-        nod_here = [d for d in NODATA if part["date"].min() - pd.Timedelta(days=15) <= d <= part["date"].max()]
-        if n == 0 and nod_here:
-            key += "  ·  " + ", ".join(f"{d:%d %b}" for d in nod_here) + ": no data"
-        if any_est and n == len(halves) - 1:
-            key += "  ·  e = missing reading, estimated"
-        st.markdown(f'<div class="ae-key">{escape(key)}</div>', unsafe_allow_html=True)
+    per = " (per month)" if GROUP == "Month" else ""
+    h2(f"Inverter-wise readings, {_span(first, last)}{per}")
+    st.markdown(_inv_table_html(cols), unsafe_allow_html=True)
+    key = _roof_key()
+    if NODATA and not IS_CUSTOMER:
+        key += "  ·  " + ", ".join(f"{d:%d %b}" for d in NODATA) + ": no data"
+    if IS_PROJ and not IS_CUSTOMER and any(inv[f"proj_{p}"].any() for p in cols if f"proj_{p}" in inv):
+        key += "  ·  p = projected (faulty or blank reading replaced by the group average)"
+    st.markdown(f'<div class="ae-key">{escape(key)}</div>', unsafe_allow_html=True)
 
 
 def month_total() -> None:
@@ -712,7 +815,7 @@ def month_total() -> None:
                         use_container_width=True)
     note_t = (BILL or {}).get("inverter_note_title") or ""
     note_b = (BILL or {}).get("inverter_note_body") or ""
-    if note_t and not IS_AVG:  # AVG-VIEW: inverter-specific note is inverter data
+    if note_t and not IS_PROJ:  # inverter-specific note describes the actual readings
         with c2:
             st.markdown("<div style='height:180px'></div>", unsafe_allow_html=True)
             st.markdown(f'<div class="ae-side"><div class="ae-card"><h4>{ico("warn", "coral")}{escape(note_t)}</h4>'
@@ -739,38 +842,48 @@ def grid_exchange() -> None:
 
 def statement(customer: bool = False) -> None:
     est = BILL_BASED and not customer
-    lead = ("Weather and inverter actual; LT, HT and site load spread by day from bill totals (italic)"
+    lead = (f"Weather and inverter {DATA_WORD}; LT, HT and site load spread by day from bill totals (italic)"
             if est else ("" if customer else "Weather, inverter and meter readings"))
     star = "*" if est else ""
-    cols = ["Date", "Day", "Weather", "Temp °C", "Wind m/s", "Inverter kWh", f"LT meter kWh{star}",
-            f"HT import kWh{star}", f"HT export kWh{star}", f"HT net kWh{star}", f"Site load kWh{star}"]
-    low = set(DAILY.loc[very_low_mask(DAILY["inverter_kwh"].dropna()).reindex(DAILY.index, fill_value=False), "date"])
-    halves = [DAILY[DAILY["date"].dt.day <= 15], DAILY[DAILY["date"].dt.day > 15]] if month else [DAILY]
-    halves = [h for h in halves if len(h)]
+    meters = ("lt_kwh", "ht_import_kwh", "ht_export_kwh", "ht_net_kwh", "site_load_kwh")
     f0 = lambda v: "—" if pd.isna(v) else f"{v:,.0f}"
     ic = "i" if est else ""
-    for n, part in enumerate(halves):
-        h2(f"Consolidated daily statement, {_span(part['date'].min(), part['date'].max())}", lead)
-        rows = []
-        for r in part.itertuples():
+    inv_head = "Inverter kWh" + ("" if ALL_SEL else f" ({', '.join(SEL)})")
+    per = " (per month)" if GROUP == "Month" else ""
+    h2(f"Consolidated daily statement, {_span(first, last)}{per}", lead)
+    rows = []
+    if GROUP == "Month":
+        cols = ["Month", "Days", inv_head, f"LT meter kWh{star}", f"HT import kWh{star}", f"HT export kWh{star}",
+                f"HT net kWh{star}", f"Site load kWh{star}"]
+        m = _month_rows(DAILY.assign(inverter_kwh=DAILY["inverter_kwh"]), ["inverter_kwh", *meters])
+        for _, r in m.iterrows():
+            rows.append(f'<tr><td class="b">{r["label"]}</td><td>{int(r["days"])}</td>'
+                        f'<td class="b">{f0(r["inverter_kwh"])}</td>'
+                        + "".join(f'<td class="{ic}">{f0(r[c])}</td>' for c in meters) + "</tr>")
+        span = 2
+    else:
+        cols = ["Date", "Day", "Weather", "Temp °C", "Wind m/s", inv_head, f"LT meter kWh{star}",
+                f"HT import kWh{star}", f"HT export kWh{star}", f"HT net kWh{star}", f"Site load kWh{star}"]
+        low = set(DAILY.loc[very_low_mask(DAILY["inverter_kwh"].dropna()).reindex(DAILY.index, fill_value=False), "date"])
+        multi_year = first.year != last.year
+        for r in DAILY.itertuples():
             inv_cell = ('<td class="b">—</td>' if customer else '<td class="i">No data</td>') if r.no_data \
                 else f'<td class="b">{f0(r.inverter_kwh)}</td>'
             rows.append(
-                f'<tr class="{"lowbg" if r.date in low else ""}"><td class="b">{r.date:%d %b}</td><td>{r.day}</td>'
-                f'<td class="wx">{escape(r.weather) or "—"}</td>'
-                f'<td>{"—" if pd.isna(r.temp_c) else f"{r.temp_c:.1f}"}</td>'
-                f'<td>{"—" if pd.isna(r.wind_ms) else f"{r.wind_ms:.1f}"}</td>{inv_cell}'
-                + "".join(f'<td class="{ic}">{f0(getattr(r, c))}</td>' for c in
-                          ("lt_kwh", "ht_import_kwh", "ht_export_kwh", "ht_net_kwh", "site_load_kwh")) + "</tr>")
-        if n == len(halves) - 1:
-            label = f"Total {MONTH_NAME}" if month else f"Total {_span(first, last)}"
-            rows.append(f'<tr class="total"><td colspan="5">{label}</td><td>{KPIS["inverter_kwh"]:,.0f}</td>'
-                        + "".join(f"<td>{f0(DAILY[c].sum(min_count=1))}</td>" for c in
-                                  ("lt_kwh", "ht_import_kwh", "ht_export_kwh", "ht_net_kwh", "site_load_kwh"))
-                        + "</tr>")
-        st.markdown('<div class="ae-tw"><table class="ae-t"><tr>'
-                    + "".join(f'<th class="wx">{c}</th>' if c == "Weather" else f"<th>{c}</th>" for c in cols)
-                    + "</tr>" + "".join(rows) + "</table></div>", unsafe_allow_html=True)
+                f'<tr class="{"lowbg" if r.date in low else ""}"><td class="b">'
+                f'{r.date:%d %b %Y}</td>' if multi_year else
+                f'<tr class="{"lowbg" if r.date in low else ""}"><td class="b">{r.date:%d %b}</td>')
+            rows[-1] += (f'<td>{r.day}</td><td class="wx">{escape(r.weather) or "—"}</td>'
+                         f'<td>{"—" if pd.isna(r.temp_c) else f"{r.temp_c:.1f}"}</td>'
+                         f'<td>{"—" if pd.isna(r.wind_ms) else f"{r.wind_ms:.1f}"}</td>{inv_cell}'
+                         + "".join(f'<td class="{ic}">{f0(getattr(r, c))}</td>' for c in meters) + "</tr>")
+        span = 5
+    label = f"Total {MONTH_NAME}" if (month and not filtered) else f"Total {_span(first, last)}"
+    rows.append(f'<tr class="total"><td colspan="{span}">{label}</td><td>{f0(DAILY["inverter_kwh"].sum(min_count=1))}</td>'
+                + "".join(f"<td>{f0(DAILY[c].sum(min_count=1))}</td>" for c in meters) + "</tr>")
+    st.markdown('<div class="ae-scroll"><table class="ae-t"><tr>'
+                + "".join(f'<th class="wx">{c}</th>' if c == "Weather" else f"<th>{c}</th>" for c in cols)
+                + "</tr>" + "".join(rows) + "</table></div>", unsafe_allow_html=True)
     buf = io.BytesIO()
     if customer:
         clean = pd.DataFrame({
@@ -797,8 +910,8 @@ def statement(customer: bool = False) -> None:
 
 
 def observations(can_edit_notes: bool) -> None:
-    n_est = 0 if IS_AVG else int(sum(inv[f"est_{p}"].sum() for p in INVERTER_IDS if f"est_{p}" in inv))
-    items = followups(MONTH_NAME or "Period", BILL, GRID, inverter_issues(inv, "month" if month else "period"),
+    n_est = int(sum(inv[f"proj_{p}"].sum() for p in INVERTER_IDS if f"proj_{p}" in inv)) if IS_PROJ else 0
+    items = followups(MONTH_NAME or "Period", BILL, GRID, inverter_issues(inv, "month" if month else "period", SEL),
                       NODATA, n_est)
     note = db.load_note(month) if month else ""
     if note:
@@ -827,7 +940,9 @@ def more_analysis() -> None:
     with st.expander("More analysis: productivity, power factor, AC loss and meter readings"):
         productivity_section()
         eb_pf_section()
-        if BILL_BASED:
+        if not ALL_SEL:
+            st.info("AC loss compares all inverters with the LT meter; select all inverters to see it.")
+        elif BILL_BASED:
             st.info("AC loss per reading period needs daily LT meter readings; this month's LT figures come from the bill.")
         else:
             ac_loss_section()
@@ -848,6 +963,79 @@ def pf_text() -> str:
     if GRID["pf_avg"] is None:
         return "not recorded"
     return f"{GRID['pf_avg']:.3f} avg · {GRID['pf_min']:.3f} min"
+
+
+def actual_vs_projected() -> None:
+    """O&M Manager only: both data sets side by side for the days in view."""
+    raw = RAW_INV[RAW_INV["date"].isin(inv["date"])].reset_index(drop=True)
+    if raw.empty:
+        return
+    proj, replaced = project(raw)
+    a, pj = raw[SEL].sum(), proj[SEL].sum()
+    n = replaced[SEL].sum()
+    tbl = pd.DataFrame({"Inverter": SEL, "Location": [INVERTERS[p] for p in SEL],
+                        "Actual kWh": a.values, "Projected kWh": pj.values,
+                        "Difference kWh": (pj - a).values, "Readings projected": n.values})
+    tbl.loc[len(tbl)] = ["Total", "", a.sum(), pj.sum(), pj.sum() - a.sum(), int(n.sum())]
+    h2("Actual vs projected", f"Backend projection: {int(n.sum())} faulty or blank reading(s) replaced by the "
+       f"average of the healthy inverters in the same group. Customers see the projected data.")
+    rows = "".join(
+        f'<tr class="{"total" if r["Inverter"] == "Total" else ""}"><td class="b">{r["Inverter"]}</td>'
+        f'<td>{escape(r["Location"])}</td><td>{r["Actual kWh"]:,.2f}</td><td>{r["Projected kWh"]:,.2f}</td>'
+        f'<td>{r["Difference kWh"]:+,.2f}</td><td>{int(r["Readings projected"])}</td></tr>'
+        for _, r in tbl.iterrows())
+    st.markdown('<div class="ae-tw"><table class="ae-t"><tr><th>Inverter</th><th>Location</th><th>Actual kWh</th>'
+                '<th>Projected kWh</th><th>Difference</th><th>Readings projected</th></tr>' + rows + "</table></div>",
+                unsafe_allow_html=True)
+    changed = [(d, p, raw.at[i, p], proj.at[i, p]) for i, d in enumerate(raw["date"]) for p in SEL
+               if replaced.at[i, p]]
+    with st.expander(f"Every projected reading ({len(changed)})"):
+        st.dataframe(pd.DataFrame([{"Date": f"{d:%d %b %Y}", "Inverter": p,
+                                    "Actual kWh": None if pd.isna(x) else round(x, 2), "Projected kWh": round(y, 2)}
+                                   for d, p, x, y in changed]), hide_index=True, use_container_width=True)
+
+
+# ---------------- customer portal views ----------------
+def lt_view() -> None:
+    h2("LT meter, date-wise with weather" if GROUP == "Day" else "LT meter, month-wise")
+    st.plotly_chart(charts.lt_daily_chart(DAILY), use_container_width=True)
+    f0 = lambda v: "—" if pd.isna(v) else f"{v:,.0f}"
+    if GROUP == "Month":
+        m = _month_rows(DAILY, ["lt_kwh"])
+        head = "<th>Month</th><th>Days</th><th>LT meter kWh</th>"
+        rows = "".join(f'<tr><td class="b">{r["label"]}</td><td>{int(r["days"])}</td><td class="b">{f0(r["lt_kwh"])}</td></tr>'
+                       for _, r in m.iterrows())
+        span = 2
+    else:
+        head = '<th>Date</th><th>Day</th><th class="wx">Weather</th><th>Temp °C</th><th>Wind m/s</th><th>LT meter kWh</th>'
+        rows = "".join(
+            f'<tr><td class="b">{r.date:%d %b}</td><td>{r.day}</td><td class="wx">{escape(r.weather) or "—"}</td>'
+            f'<td>{"—" if pd.isna(r.temp_c) else f"{r.temp_c:.1f}"}</td>'
+            f'<td>{"—" if pd.isna(r.wind_ms) else f"{r.wind_ms:.1f}"}</td><td class="b">{f0(r.lt_kwh)}</td></tr>'
+            for r in DAILY.itertuples())
+        span = 5
+    rows += f'<tr class="total"><td colspan="{span}">Total</td><td>{f0(DAILY["lt_kwh"].sum(min_count=1))}</td></tr>'
+    st.markdown(f'<div class="ae-scroll"><table class="ae-t"><tr>{head}</tr>{rows}</table></div>', unsafe_allow_html=True)
+
+
+def ht_view() -> None:
+    grid_exchange()
+    f0 = lambda v: "—" if pd.isna(v) else f"{v:,.0f}"
+    cols3 = ("ht_import_kwh", "ht_export_kwh", "ht_net_kwh")
+    if GROUP == "Month":
+        m = _month_rows(DAILY, list(cols3))
+        head = "<th>Month</th><th>Days</th>"
+        rows = "".join(f'<tr><td class="b">{r["label"]}</td><td>{int(r["days"])}</td>'
+                       + "".join(f"<td>{f0(r[c])}</td>" for c in cols3) + "</tr>" for _, r in m.iterrows())
+    else:
+        head = "<th>Date</th><th>Day</th>"
+        rows = "".join(f'<tr><td class="b">{r.date:%d %b}</td><td>{r.day}</td>'
+                       + "".join(f"<td>{f0(getattr(r, c))}</td>" for c in cols3) + "</tr>" for r in DAILY.itertuples())
+    rows += ('<tr class="total"><td colspan="2">Total</td>'
+             + "".join(f"<td>{f0(DAILY[c].sum(min_count=1))}</td>" for c in cols3) + "</tr>")
+    st.markdown(f'<div class="ae-scroll" style="margin-top:12px"><table class="ae-t"><tr>{head}'
+                '<th>Import kWh</th><th>Export kWh</th><th>Net import kWh</th></tr>' + rows + "</table></div>",
+                unsafe_allow_html=True)
 
 
 def ac_loss_section() -> None:
@@ -960,13 +1148,23 @@ def dashboard(can_edit_notes: bool, show_grafana: bool) -> None:
     page_logo()
     if IS_CUSTOMER:                     # customer portal: three sections only
         customer_title()
-        at_a_glance(customer=True)
-        statement(customer=True)
+        at_a_glance(customer=True)                        # overall dashboard
+        t_inv, t_lt, t_ht, t_all = st.tabs(["Inverter view", "LT meter view", "HT meter view", "Consolidated view"])
+        with t_inv:
+            inverter_readings()
+        with t_lt:
+            lt_view()
+        with t_ht:
+            ht_view()
+        with t_all:
+            statement(customer=True)
         return
     if show_grafana and GRAFANA_URL:
         st.link_button("Open live monitoring in Grafana", GRAFANA_URL)
     cover()
     at_a_glance()
+    if IS_ADMIN and VIEWS != ["Actuals"]:
+        actual_vs_projected()
     bill_slide()
     daily_generation()
     inverter_vs_lt()

@@ -29,11 +29,11 @@ def productivity_band(yield_kwh_kwp: float) -> str:
     return PRODUCTIVITY_BANDS[-1][0]
 
 
-def enrich(inv: pd.DataFrame) -> pd.DataFrame:
+def enrich(inv: pd.DataFrame, capacity_kwp: float = PLANT_CAPACITY_KWP) -> pd.DataFrame:
     """Add columns used by filters. Outage is judged on the whole loaded period,
     so filtering to e.g. rainy days doesn't change which days count as outages."""
     out = inv.copy()
-    out["yield_kwh_kwp"] = out["Total"] / PLANT_CAPACITY_KWP
+    out["yield_kwh_kwp"] = out["Total"] / capacity_kwp      # capacity of the inverters selected
     out["productivity"] = out["yield_kwh_kwp"].map(productivity_band)
     out["weather_group"] = out["weather"].map(weather_group)
     out["day_type"] = out["date"].dt.dayofweek.map(lambda d: "Weekend" if d >= 5 else "Weekday")

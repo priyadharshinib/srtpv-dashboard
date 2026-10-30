@@ -50,9 +50,9 @@ PLANT_LAT = 12.89
 PLANT_LON = 77.47
 PLANT_TIMEZONE = "Asia/Kolkata"
 
-# TEMPORARY Avg View (see core/views.py). Set to False, or set the secret
-# AVG_VIEW_ENABLED = "false", to switch it off everywhere without a code change.
-AVG_VIEW_ENABLED = True
+# Projected view (see core/views.py). Set to False, or set the secret
+# PROJECTED_VIEW_ENABLED = "false", to switch it off everywhere without a code change.
+PROJECTED_VIEW_ENABLED = True
 
 # "At a glance" labels: LT and HT figures come from the monthly bill readings
 METER_FIGURES_FROM_BILL = True
@@ -74,3 +74,13 @@ VERY_LOW_FRACTION = 0.35
 
 # Spreading the monthly bill over days: site load by day type, scaled to the bill total
 SITE_LOAD_WEIGHTS = {"weekday": 1.0, "Sat": 0.8471, "Sun": 0.7097}
+
+# Projected view: a reading below this share of the average of the healthy inverters on the
+# same roof is treated as faulty and replaced by that average (matches the manual projected sheet)
+PROJECTION_THRESHOLD = 0.70
+# Groups of inverters that normally produce alike (used for projection)
+PROJECTION_GROUPS = {
+    "RR Auditorium": ["PV1", "PV2", "PV3"],
+    "RR College": ["PV4", "PV5", "PV6"],
+    "RR Hospital": ["PV7", "PV8", "PV9"],
+}

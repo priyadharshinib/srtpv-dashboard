@@ -1,17 +1,16 @@
-"""Actuals View and Avg View  (AVG-VIEW: temporary).
+"""Actuals View and Projected View.
 
-The Avg View replaces each inverter's daily kWh with that day's plant total
-divided equally across the inverters. The plant Total is unchanged, so every
-other figure (KPIs, LT, EB, AC loss, productivity, charts) stays identical.
+Actuals    - inverter readings exactly as imported (blank stays blank).
+Projected  - faulty inverter readings replaced by the backend projection
+             (core/projection.py). Computed on the fly, never stored.
 
 Who sees what:
-  O&M Manager    (admin)         Actuals or Avg (switch in the sidebar)
+  O&M Manager    (admin)         Actuals or Projected (switch in the sidebar)
   O&M Executive  (site_manager)  Actuals
-  Customer       (customer)      Avg only, cannot switch
+  Customer       (customer)      Projected only, cannot switch
 
-To retire the Avg View later:
-  1. quick:     set AVG_VIEW_ENABLED = "false" in Secrets (everyone sees Actuals), or
-  2. permanent: delete this file and the lines marked AVG-VIEW in app.py.
+To stop using projections (e.g. once the inverters are repaired), set the secret
+PROJECTED_VIEW_ENABLED = "false": everyone then sees Actuals.
 """
 from __future__ import annotations
 
@@ -19,38 +18,39 @@ import pandas as pd
 
 from core import config
 from core.config import INVERTER_IDS
+from core.projection import project
 from core.settings import get_setting
 
 ACTUALS = "Actuals"
-AVG = "Avg"
+PROJECTED = "Projected"
 
 
-def avg_view_enabled() -> bool:
-    override = get_setting("AVG_VIEW_ENABLED")
+def projected_view_enabled() -> bool:
+    override = get_setting("PROJECTED_VIEW_ENABLED") or get_setting("AVG_VIEW_ENABLED")
     if override is not None:
         return str(override).strip().lower() in ("1", "true", "yes", "on")
-    return bool(config.AVG_VIEW_ENABLED)
+    return bool(getattr(config, "PROJECTED_VIEW_ENABLED", True))
 
 
 def views_for(role: str) -> list[str]:
     """Views a role may use; the first one is the default."""
-    if not avg_view_enabled():
+    if not projected_view_enabled():
         return [ACTUALS]
     if role == "admin":
-        return [ACTUALS, AVG]
+        return [ACTUALS, PROJECTED]
     if role == "customer":
-        return [AVG]
+        return [PROJECTED]
     return [ACTUALS]
 
 
 def apply_view(inv: pd.DataFrame, view: str) -> pd.DataFrame:
-    """Return inverter data for the chosen view. Only PV1..PV9 change."""
-    if view != AVG:
-        return inv
-    out = inv.copy()
-    share = out["Total"] / len(INVERTER_IDS)
+    """Inverter data for the chosen view. Adds proj_PV1..proj_PV9 flags (True = projected)."""
+    if view != PROJECTED or inv.empty:
+        out = inv.copy()
+        for p in INVERTER_IDS:
+            out[f"proj_{p}"] = False
+        return out
+    out, replaced = project(inv)
     for p in INVERTER_IDS:
-        out[p] = share
-        if f"est_{p}" in out.columns:
-            out[f"est_{p}"] = False
+        out[f"proj_{p}"] = replaced[p].values
     return out

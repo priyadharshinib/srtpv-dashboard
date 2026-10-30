@@ -174,10 +174,10 @@ def report_daily_chart(daily: pd.DataFrame) -> go.Figure:
     return _r_layout(fig, 360)
 
 
-def inverter_vs_lt_chart(daily: pd.DataFrame, lt_estimated: bool) -> go.Figure:
+def inverter_vs_lt_chart(daily: pd.DataFrame, lt_estimated: bool, inverter_label: str = "Inverter (actual)") -> go.Figure:
     x = daily["date"].dt.strftime("%d")
     fig = go.Figure()
-    fig.add_scatter(x=x, y=daily["inverter_kwh"], name="Inverter (actual)", mode="lines+markers",
+    fig.add_scatter(x=x, y=daily["inverter_kwh"], name=inverter_label, mode="lines+markers",
                     line=dict(color=R_AMBER, width=2.5), marker=dict(size=7), connectgaps=False)
     fig.add_scatter(x=x, y=daily["lt_kwh"], name="LT meter (daily estimate)" if lt_estimated else "LT meter",
                     mode="lines+markers", line=dict(color=R_TEAL, width=2.5), marker=dict(size=7))
@@ -216,3 +216,12 @@ def grid_exchange_report(daily: pd.DataFrame) -> go.Figure:
     fig.update_annotations(font=dict(size=13, color=R_INK))
     fig.update_yaxes(range=[0, max(float(exp.max()) * 1.35, 1)], row=2, col=1)
     return fig
+
+
+def lt_daily_chart(daily: pd.DataFrame) -> go.Figure:
+    """LT meter kWh per day (customer LT view)."""
+    x = daily["date"].dt.strftime("%d")
+    fig = go.Figure(go.Bar(x=x, y=daily["lt_kwh"], marker_color=R_TEAL, name="LT meter (kWh)",
+                           customdata=daily[["weather"]].fillna(""),
+                           hovertemplate="%{y:,.0f} kWh · %{customdata[0]}<extra></extra>"))
+    return _r_layout(fig, 340)

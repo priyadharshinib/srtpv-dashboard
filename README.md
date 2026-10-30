@@ -59,6 +59,27 @@ Logins use Supabase Auth (email + password). Roles are kept in `solar.app_users`
 
 All roles see the same dashboard. Only PV1–PV9 values differ between views.
 
+## Actual and projected data
+
+- **Actuals**: inverter readings exactly as imported (a blank stays blank).
+- **Projected** (computed in the backend, never stored, `core/projection.py`): a reading that
+  is blank, below 70% of the average of the other inverters in its group, or far above them, is
+  replaced by the average of the healthy inverters in the group (Auditorium PV1–3, College
+  PV4–6, Hospital PV7–9; `PROJECTION_GROUPS` in `core/config.py`). A whole group offline stays blank.
+- O&M Manager: switch Actuals / Projected, plus an "Actual vs projected" table. O&M Executive:
+  Actuals. Customer: Projected only, with no markers.
+- Turn projections off everywhere with the secret `PROJECTED_VIEW_ENABLED = "false"`.
+
+The importer also reads the portal's long export (Date, Roof, Temperature, Weather, Wind Speed,
+Production, Consumption, Daily Total; one row per inverter per day). A clearly mislabelled row
+(one inverter twice, one missing, the extra row in the missing one's position) is corrected
+with a note; anything less clear is refused.
+
+## Customer portal
+
+Logo and title, the month "at a glance", then four tabs: Inverter view, LT meter view (date-wise
+with weather), HT meter view (import/export) and Consolidated view.
+
 ## Report-style dashboard
 
 The dashboard follows the asase.energy monthly report, section by section: cover,
@@ -68,30 +89,23 @@ consolidated daily statement, observations and follow-up. Extra analysis
 (productivity, power factor, AC loss, meter readings) is under "More analysis".
 Code: the report section of `app.py`, `core/report.py`, report charts in `core/charts.py`.
 
-## Missing data and estimates (`core/estimation.py`)
+## Missing data and estimates
 
-- **Missing inverter reading** (blank or n/a): filled so the day matches the sheet's
-  Total; with no Total, from that inverter's usual share. Marked "e" in the table
-  (Actuals View only) and listed in the import message / bot reply.
-- **Day with no inverter data at all**: shown as "No data"; the chart shows an
+- **Blank inverter reading**: kept blank in Actuals; the Projected view fills it (see above).
+- **Day with no inverter data at all**: shown as "No data" to staff; the daily chart shows an
   estimate (grey) from the LT meter.
-- **Bill totals entered** (LT units, HT import, HT export): the bill is the month's
-  LT/HT figure. Daily values are spread as in the report: a no-data day gets LT ÷ days
-  in month, the rest follows inverter output; site load by day type (weekday 1.0,
-  Sat 0.8471, Sun 0.7097 in `core/config.py`); HT import = site load − LT + export;
-  export from the daily HT sheet. Shown in italic with *.
+- **Bill totals entered** (LT units, HT import, HT export): the bill is the month's LT/HT figure.
+  Daily values are spread as in the monthly report (`core/estimation.py`): a no-data day gets
+  LT ÷ days in month, the rest follows inverter output; site load by day type (weekday 1.0,
+  Sat 0.8471, Sun 0.7097); HT import = site load − LT + export. Staff see these in italic with *.
 
 ## Importing a month in parts
 
-Import data → choose **Data month**, then upload. "Already imported" shows which days
+Import data → choose **Data month** (or **All months in the file**), then upload. "Already imported" shows which days
 each sheet has so far. Days already in the database are skipped (or replaced, if you
 choose that), dates outside the chosen month are refused, and an LT batch must continue
-from the last saved closing reading. Code: `core/batches.py`.
-
-## Customer portal
-
-Customers see the logo, title, "at a glance" (without outage notes) and the
-consolidated daily statement only — no footer, estimate markers or analysis wording.
+from the last saved closing reading. "Replace the whole month" clears the month first.
+Tools → "delete a month's data" removes test data or a wrong import. Code: `core/batches.py`.
 
 ## Monthly HT bill
 
@@ -100,21 +114,22 @@ true-up), average PF, maximum demand with date/time, contract demand and the exp
 settlement note. The dashboard then shows the "HT bill and demand" block, with an
 automatic headline and a "Why the demand peaked" note built from that day's solar output.
 
-## Avg View (temporary)
-
-In the Avg View each inverter shows that day's plant total divided by 9, so the
-plant total and every other figure stay identical. Code: `core/views.py` and the
-lines marked `AVG-VIEW` in `app.py`.
-
-To retire it: set the secret `AVG_VIEW_ENABLED = "false"` (everyone sees Actuals,
-no deploy needed), then later delete `core/views.py`, the `AVG-VIEW` lines in
-`app.py` and the `AVG-VIEW` tests in `tests/test_core.py`.
-
 ## Filters (sidebar)
 
-Month or any date range · weather group · productivity band (kWh per kWp per day,
-bands in core/config.py) · weekday/weekend · which inverters to show.
-Outage days are judged on the whole loaded period, so filtering doesn't change them.
+Every filter updates the whole page — cards, charts, the inverter table and the statement:
+
+- **Period**: Month, Date range or Single day. Whole months are loaded behind the scenes so
+  bill-based daily figures are spread correctly, then cut to the chosen dates.
+- **Inverters**: the selection drives every inverter figure (cards, charts, tables, statement,
+  performance). LT/HT meters measure the whole plant, so inverter-vs-LT comparisons and AC loss
+  show only when all inverters are selected.
+- **Weather**, **Performance** (kWh per kWp per day, using the selected inverters' share of
+  capacity), **Days** (weekday/weekend), and for staff **Inverter health** (days with a faulty
+  reading / with all readings normal).
+- **Show tables per Day or Month** when the period covers more than one month.
+
+The inverter-wise readings and the consolidated statement are single scrollable tables with the
+header and total row kept in view.
 
 ## Data bot (automatic import by email + automatic weather)
 

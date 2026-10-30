@@ -191,7 +191,8 @@ def save_inverter(inv: pd.DataFrame) -> None:
         for _, r in inv.iterrows():
             d = r["date"].date()
             s.add_all(InverterReading(date=d, inverter=p, kwh=float(r[p]),
-                                      estimated=bool(r.get(f"est_{p}", False))) for p in INVERTER_IDS)
+                                      estimated=bool(r.get(f"est_{p}", False)))
+                      for p in INVERTER_IDS if pd.notna(r[p]))          # blank readings are not stored
             s.add(DailyWeather(date=d, temp_c=_nan_to_none(r["temp_c"]),
                                weather=r["weather"] or None, wind_ms=_nan_to_none(r["wind_ms"])))
 
@@ -276,6 +277,13 @@ def load_range(start: dt.date, end: dt.date) -> tuple[pd.DataFrame, pd.DataFrame
     inv["Total"] = inv[INVERTER_IDS].sum(axis=1).round(2)
     inv["weather"] = inv["weather"].fillna("")
     est["date"] = pd.to_datetime(est["date"])          # same date type as inv before joining
+    # readings filled at import by an earlier version are not actual readings: show them blank
+    for p in INVERTER_IDS:
+        col = f"est_{p}"
+        if col in est.columns and p in inv.columns:
+            flag = inv["date"].map(est.set_index("date")[col]).fillna(False).astype(bool)
+            inv.loc[flag.values, p] = float("nan")
+    inv["Total"] = inv[INVERTER_IDS].sum(axis=1, min_count=1).round(2)
     inv = inv.merge(est, on="date", how="left")
     for p in INVERTER_IDS:
         inv[f"est_{p}"] = inv[f"est_{p}"].fillna(False).astype(bool) if f"est_{p}" in inv else False
@@ -415,3 +423,21 @@ def lt_closing_before(day: dt.date) -> float | None:
     with Session(engine) as s:
         return s.scalar(select(LtMeterPeriod.closing).where(LtMeterPeriod.to_date < day)
                         .order_by(LtMeterPeriod.to_date.desc()).limit(1))
+
+
+
+def clear_month(month: str, kinds: list[str]) -> dict[str, int]:
+    """Delete a month's data before re-importing it. kinds: inverter, lt, ht, bill."""
+    start, end = _month_range(month)
+    done = {}
+    with Session(engine) as s, s.begin():
+        if "inverter" in kinds:
+            done["inverter"] = s.execute(delete(InverterReading).where(InverterReading.date.between(start, end))).rowcount
+            s.execute(delete(DailyWeather).where(DailyWeather.date.between(start, end)))
+        if "lt" in kinds:
+            done["lt"] = s.execute(delete(LtMeterPeriod).where(LtMeterPeriod.from_date.between(start, end))).rowcount
+        if "ht" in kinds:
+            done["ht"] = s.execute(delete(HtMeterDaily).where(HtMeterDaily.date.between(start, end))).rowcount
+        if "bill" in kinds:
+            done["bill"] = s.execute(delete(MonthlyBill).where(MonthlyBill.month == month)).rowcount
+    return done

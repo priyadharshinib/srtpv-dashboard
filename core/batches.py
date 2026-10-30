@@ -15,6 +15,14 @@ import pandas as pd
 
 ADD_NEW = "Keep what's already there, add only new days"
 REPLACE = "Replace those days with this file"
+REPLACE_MONTH = "Replace the whole month (delete its old data first)"
+ALL_MONTHS = "ALL"
+
+
+def split_by_month(kind: str, df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """{'2026-08': rows for August, ...} using the date (LT: the period's start date)."""
+    key = df["from_date"] if kind == "lt" else df["date"]
+    return {m: part.reset_index(drop=True) for m, part in df.groupby(key.dt.strftime("%Y-%m"))}
 
 
 def ranges(days) -> str:
@@ -56,7 +64,7 @@ def prepare_batch(kind: str, df: pd.DataFrame, month: str, existing_days, mode: 
                       "Choose the right month, or remove those rows.")
         return df.iloc[0:0], errors, notes
 
-    existing = {pd.Timestamp(d).normalize() for d in existing_days}
+    existing = set() if mode == REPLACE_MONTH else {pd.Timestamp(d).normalize() for d in existing_days}
     overlap = [any(d in existing for d in days) for days in rows]
     if any(overlap):
         dup_days = sorted({d for days, o in zip(rows, overlap) if o for d in days if d in existing})

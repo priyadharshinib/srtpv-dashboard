@@ -113,6 +113,16 @@ def build_period(inv: pd.DataFrame, lt: pd.DataFrame, ht: pd.DataFrame, bills: d
     daily["weather"] = daily["weather"].fillna("")
     lo = pd.concat(lt_parts, ignore_index=True) if lt_parts else lt
     ho = pd.concat(ht_parts, ignore_index=True) if ht_parts else ht
+    # combining months with and without data can turn date columns into plain objects
+    for frame, cols in ((lo, ("from_date", "to_date")), (ho, ("date",))):
+        for c in cols:
+            frame[c] = pd.to_datetime(frame[c])
+    for c in ("kwh", "opening", "closing", "units"):
+        if c in lo:
+            lo[c] = pd.to_numeric(lo[c], errors="coerce")
+    for c in ("import_kwh", "export_kwh", "net_import_kwh", "power_factor"):
+        if c in ho:
+            ho[c] = pd.to_numeric(ho[c], errors="coerce")
     lo = lo[(lo["from_date"] >= start) & (lo["from_date"] <= end)].reset_index(drop=True)
     ho = ho[(ho["date"] >= start) & (ho["date"] <= end)].reset_index(drop=True)
     nodata = daily.loc[daily["no_data"], "date"].tolist()
@@ -145,7 +155,7 @@ def followups(month_name: str | None, bill: dict | None, grid: dict, glance_inve
                       f"No inverter data for {', '.join(f'{d:%d %b}' for d in nodata)}. "
                       "Check the data logger and internet link so the next report is complete."))
     if n_estimated_cells:
-        items.append(("Estimated inverter readings",
-                      f"{n_estimated_cells} missing inverter reading(s) were filled from the day's total or the "
-                      "inverter's usual share, and are marked in the table."))
+        items.append(("Projected inverter readings",
+                      f"{n_estimated_cells} faulty or blank inverter reading(s) are projected from the healthy "
+                      "inverters in the same group, and are marked p in the table."))
     return items

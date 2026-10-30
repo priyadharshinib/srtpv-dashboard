@@ -84,16 +84,89 @@ def _check_dates(df: pd.DataFrame, col: str, errors: list[str]) -> None:
 
 # ---------- inverter sheet ----------
 
+def _num(series: pd.Series) -> pd.Series:
+    """'24.5°C' -> 24.5, '5.5 m/s' -> 5.5."""
+    return pd.to_numeric(series.astype(str).str.extract(r"(-?\d+(?:\.\d+)?)")[0], errors="coerce")
+
+
+def long_to_wide(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Portal export with one row per inverter per day (Date, Roof, Temperature, Weather,
+    Wind Speed, Production, ..., Daily Total) -> one row per day with PV1..PV9."""
+    errors: list[str] = []
+    d = df.copy()
+    d.columns = [str(c).strip() for c in d.columns]
+    col = lambda *names: next((c for c in d.columns if c.lower().replace(" ", "").startswith(names)), None)
+    c_date, c_roof, c_prod = col("date"), col("roof"), col("production")
+    c_temp, c_wx, c_wind, c_total = col("temp"), col("weather"), col("wind"), col("dailytotal")
+    raw = d[c_date].astype(str).str.strip()
+    d["date"] = pd.to_datetime(raw, format="%d.%m.%Y", errors="coerce")
+    rest = d["date"].isna() & d[c_date].notna()
+    d.loc[rest, "date"] = _parse_dates(d.loc[rest, c_date])
+    d = d[d["date"].notna() & d[c_roof].notna()].copy()        # drops the units row and the G.Total row
+    d["inv"] = d[c_roof].astype(str).str.upper().str.extract(r"(PV\s*\d+)")[0].str.replace(" ", "", regex=False)
+    bad = sorted(set(d.loc[~d["inv"].isin(INVERTER_IDS), c_roof].astype(str)))
+    if bad:
+        errors.append(f"Roof names without a known inverter (PV1–PV9): {bad[:5]}")
+    d = d[d["inv"].isin(INVERTER_IDS)]
+    fixes = []
+    for day, rows in d.groupby("date", sort=False):
+        invs = rows["inv"].tolist()
+        dups = {p for p in invs if invs.count(p) > 1}
+        if not dups:
+            continue
+        missing_inv = [p for p in INVERTER_IDS if p not in invs]
+        # Unambiguous mislabel: one inverter twice, one missing, and the extra row sits
+        # exactly where the missing inverter belongs in the PV1..PV9 order.
+        if len(dups) == 1 and len(missing_inv) == 1 and len(invs) == len(INVERTER_IDS):
+            pos = INVERTER_IDS.index(missing_inv[0])
+            idx = rows.index[pos]
+            if d.at[idx, "inv"] in dups:
+                d.at[idx, "inv"] = missing_inv[0]
+                fixes.append(f"{day:%d %b}: second '{list(dups)[0]}' row read as {missing_inv[0]} "
+                             f"({d.at[idx, c_roof]} → {missing_inv[0]}, {d.at[idx, c_prod]} kWh)")
+                continue
+        vals = "; ".join(f"{r[c_roof]} = {r[c_prod]}" for _, r in rows[rows["inv"].isin(dups)].iterrows())
+        errors.append(f"{day:%d %b}: the same inverter appears twice ({vals}). Correct the Roof name and import again.")
+    if fixes:
+        d.attrs["fixes"] = fixes
+    d["prod"] = pd.to_numeric(d[c_prod], errors="coerce")
+    wide = d.pivot_table(index="date", columns="inv", values="prod", aggfunc="first").reindex(columns=INVERTER_IDS)
+    meta = d.groupby("date").agg(
+        temp_c=(c_temp, lambda s: _num(s).dropna().iloc[0] if _num(s).notna().any() else float("nan")) if c_temp else ("date", "size"),
+        weather=(c_wx, lambda s: next((str(x).strip() for x in s if pd.notna(x) and str(x).strip()), "")) if c_wx else ("date", "size"),
+        wind_ms=(c_wind, lambda s: _num(s).dropna().iloc[0] if _num(s).notna().any() else float("nan")) if c_wind else ("date", "size"),
+    )
+    out = wide.join(meta).reset_index()
+    out.attrs["fixes"] = d.attrs.get("fixes", [])
+    if c_total:
+        tot = pd.to_numeric(d[c_total], errors="coerce")
+        out["Total"] = out["date"].map(d.assign(t=tot).dropna(subset=["t"]).groupby("date")["t"].last())
+    for c in ("temp_c", "wind_ms"):
+        if not c_temp and c == "temp_c" or not c_wind and c == "wind_ms":
+            out[c] = float("nan")
+    if not c_wx:
+        out["weather"] = ""
+    return out, errors
+
+
+
 def import_inverter(file) -> ImportResult:
     """Columns: date, PV1..PV9, optional Total, temp_c, weather, wind_ms, day.
+    Also accepts the portal's long export (one row per inverter per day: Date, Roof, Production...).
 
-    Missing PV readings are filled (see core.estimation) and flagged as estimated;
-    a day with no inverter readings at all is left out and shown as "no data".
+    Blank readings stay blank (Actuals); the Projected view fills them in the dashboard.
+    A day with no inverter readings at all is left out.
     """
-    from core.estimation import fill_missing_inverters
-
     df = read_table(file)
     res = ImportResult(df)
+    cols = {str(c).strip().lower() for c in df.columns}
+    if "roof" in cols and "production" in cols:
+        df, long_errors = long_to_wide(df)
+        if long_errors:
+            res.errors.extend(long_errors)
+            return res
+        for fix in df.attrs.get("fixes", []):
+            res.warnings.append(f"Corrected a duplicated inverter label — {fix}")
     missing = _missing(df, ["date", *INVERTER_IDS])
     if missing:
         res.errors.append(f"Inverter sheet is missing columns: {missing}")
@@ -120,10 +193,8 @@ def import_inverter(file) -> ImportResult:
     if res.errors:
         return res
 
-    sheet_total = None
     if "Total" in df.columns:
         _to_numeric(df, ["Total"], res.errors)
-        sheet_total = df["Total"].copy()
         complete = df[INVERTER_IDS].notna().all(axis=1)
         diff = (df["Total"] - df[INVERTER_IDS].sum(axis=1)).abs()
         bad = df.loc[complete & df["Total"].notna() & (diff > TOTAL_MISMATCH_KWH), "date"]
@@ -131,18 +202,23 @@ def import_inverter(file) -> ImportResult:
             res.warnings.append(f"Sheet Total differs from PV1–PV9 sum on {bad.dt.date.tolist()}; using the sum")
 
     df = df.sort_values("date").reset_index(drop=True)
-    if sheet_total is not None:
-        sheet_total = df["Total"]
-    filled, nodata, notes = fill_missing_inverters(df, sheet_total)
-    if notes:
-        res.warnings.append(f"Filled {sum(filled[[f'est_{p}' for p in INVERTER_IDS]].sum())} missing "
-                            f"reading(s), marked as estimated: " + "; ".join(notes))
-    if nodata:
-        res.warnings.append(f"No inverter data on {', '.join(d.strftime('%d %b') for d in nodata)}: "
-                            "shown as no data (estimated from the LT meter in the report)")
-    filled["day"] = filled["date"].dt.strftime("%a")
-    res.df = filled[["date", "day", *INVERTER_IDS, "Total", "temp_c", "weather", "wind_ms",
-                     *[f"est_{p}" for p in INVERTER_IDS]]]
+    no_data = df[INVERTER_IDS].isna().all(axis=1)
+    if no_data.any():
+        res.warnings.append(f"No inverter readings on {', '.join(f'{d:%d %b}' for d in df.loc[no_data, 'date'])}: "
+                            "left out")
+        df = df[~no_data].reset_index(drop=True)
+    blanks = [(f"{d:%d %b}", p) for d, row in zip(df["date"], df[INVERTER_IDS].isna().values)
+              for p, b in zip(INVERTER_IDS, row) if b]
+    if blanks:
+        shown = "; ".join(f"{d} {p}" for d, p in blanks[:12]) + (" …" if len(blanks) > 12 else "")
+        res.warnings.append(f"{len(blanks)} blank reading(s) kept blank in Actuals ({shown}); "
+                            "the Projected view fills them where possible")
+    df["Total"] = df[INVERTER_IDS].sum(axis=1, min_count=1).round(2)
+    df["day"] = df["date"].dt.strftime("%a")
+    for p in INVERTER_IDS:
+        df[f"est_{p}"] = False
+    res.df = df[["date", "day", *INVERTER_IDS, "Total", "temp_c", "weather", "wind_ms",
+                 *[f"est_{p}" for p in INVERTER_IDS]]]
     return res
 
 

@@ -104,12 +104,11 @@ def test_ht_net_computed():
     assert res.ok and res.df.loc[0, "net_import_kwh"] == 5652
 
 
-def test_blank_or_na_inverter_value_is_filled_and_flagged():
+def test_blank_or_na_inverter_value_stays_blank_in_actuals():
     res = import_inverter(csv(INV_HEADER + "2026-10-01,1,1,1,1,n/a,1,1,1,1,9\n"
                                          "2026-10-02,1,1,1,1,1,1,1,1,1,9\n"))
-    assert res.ok
-    assert res.df.loc[0, "PV5"] == 1 and bool(res.df.loc[0, "est_PV5"])
-    assert any("estimated" in w for w in res.warnings)
+    assert res.ok and pd.isna(res.df.loc[0, "PV5"]) and res.df.loc[0, "Total"] == 8
+    assert any("blank" in w for w in res.warnings)
 
 
 def test_text_in_inverter_column_still_rejected():
@@ -191,33 +190,50 @@ def test_customer_averages(sample):
     assert a["avg_per_inverter_daily"] == pytest.approx(40617.29 / 13 / 9, abs=0.01)
 
 
-# ---------- Actuals vs Avg view (AVG-VIEW: delete these tests when the Avg View is retired) ----------
+# ---------- Actuals vs Projected view ----------
 
 from core.config import INVERTER_IDS
-from core.views import ACTUALS, AVG, apply_view, views_for
+from core.projection import project
+from core.views import ACTUALS, PROJECTED, apply_view, views_for
 
 
 def test_role_views(monkeypatch):
     monkeypatch.setattr("core.views.get_setting", lambda *a, **k: None)
-    assert views_for("admin") == [ACTUALS, AVG]
+    assert views_for("admin") == [ACTUALS, PROJECTED]
     assert views_for("site_manager") == [ACTUALS]
-    assert views_for("customer") == [AVG]
+    assert views_for("customer") == [PROJECTED]
 
 
-def test_avg_view_can_be_switched_off(monkeypatch):
+def test_projected_view_can_be_switched_off(monkeypatch):
     monkeypatch.setattr("core.views.get_setting", lambda *a, **k: "false")
-    assert views_for("customer") == [ACTUALS]
-    assert views_for("admin") == [ACTUALS]
+    assert views_for("customer") == [ACTUALS] and views_for("admin") == [ACTUALS]
 
 
-def test_avg_view_changes_only_inverter_columns(sample):
+def test_projection_replaces_faulty_reading_with_group_average():
+    row = {"date": pd.Timestamp("2026-09-03"), "PV1": 247.68, "PV2": 254.58, "PV3": 258.49, "PV4": 0.0,
+           "PV5": 288.44, "PV6": 289.22, "PV7": 274.87, "PV8": 273.43, "PV9": 282.22}
+    inv = pd.DataFrame([row]); inv["Total"] = inv[INVERTER_IDS].sum(axis=1)
+    out, replaced = project(inv)
+    assert out.loc[0, "PV4"] == round((288.44 + 289.22) / 2, 2)          # (PV5 + PV6) / 2
+    assert replaced.values.sum() == 1 and out.loc[0, "PV5"] == 288.44
+    assert round(out.loc[0, "Total"], 2) == 2457.76
+
+
+def test_projection_leaves_whole_offline_group_blank():
+    row = {"date": pd.Timestamp("2026-07-29"), **{p: 150.0 for p in INVERTER_IDS[:6]},
+           "PV7": float("nan"), "PV8": float("nan"), "PV9": float("nan")}
+    out, replaced = project(pd.DataFrame([row]))
+    assert out[["PV7", "PV8", "PV9"]].isna().all(axis=None) and replaced.values.sum() == 0
+
+
+def test_projected_view_changes_only_inverter_columns(sample):
     inv, lt, ht = sample
-    avg = apply_view(inv, AVG)
-    other = [c for c in inv.columns if c not in INVERTER_IDS]
-    pd.testing.assert_frame_equal(avg[other], inv[other])
-    assert (avg[INVERTER_IDS].sum(axis=1) - inv["Total"]).abs().max() < 1e-9
-    assert headline_kpis(avg, lt, ht) == headline_kpis(inv, lt, ht)
-    assert apply_view(inv, ACTUALS) is inv
+    pv = apply_view(inv, PROJECTED)
+    other = [c for c in inv.columns if c not in INVERTER_IDS + ["Total"]]
+    pd.testing.assert_frame_equal(pv[other], inv[other])
+    assert pv["PV4"].sum() > inv["PV4"].sum()                          # PV4 was weak in October
+    assert pv[[f"proj_{p}" for p in INVERTER_IDS]].values.sum() > 0
+    assert apply_view(inv, ACTUALS)[INVERTER_IDS].equals(inv[INVERTER_IDS])
 
 
 def test_glance_headline_names_inverter_only_in_actuals(sample):
@@ -227,7 +243,7 @@ def test_glance_headline_names_inverter_only_in_actuals(sample):
     actual = glance_headline(k, inv)
     assert actual.startswith("Solar covered 27% of site consumption")
     assert "PV4" in actual and "11 Oct" in actual
-    assert "PV4" not in glance_headline(k, apply_view(inv, AVG))
+    assert "PV4" not in glance_headline(k, apply_view(inv, PROJECTED))
 
 
 # ---------- HT bill ----------
@@ -362,4 +378,49 @@ def test_customer_headline_has_no_outage_clause(sample):
     inv, lt, ht = sample
     k = headline_kpis(inv, lt, ht)
     assert "largely off" in glance_headline(k, inv)
-    assert "largely off" not in glance_headline(k, apply_view(inv, AVG), include_outages=False)
+    assert "largely off" not in glance_headline(k, apply_view(inv, PROJECTED), include_outages=False)
+
+
+
+# ---------- portal export in long format (one row per inverter per day) ----------
+
+LONG = ("Date,Roof,Temprature,Weather,Wind Speed,Production,Consumption,Daily Total\n"
+        "[dd.MM.yyyy],[RoofName],[degree C],[Condition],[m/s],[kWh],[kWh],[kWh]\n")
+
+
+def _long_day(day, values, labels=None):
+    labels = labels or INVERTER_IDS
+    rows = [f"{day},RR roof {lab},25°C,Cloudy,4.0 m/s,{v},{v}," for lab, v in zip(labels, values)]
+    return "\n".join(rows) + "\n"
+
+
+def test_long_format_is_read():
+    res = import_inverter(csv(LONG + _long_day("01.10.2026", [100 + i for i in range(9)])))
+    assert res.ok and len(res.df) == 1 and res.df.loc[0, "PV9"] == 108 and res.df.loc[0, "temp_c"] == 25
+
+
+def test_long_format_mislabelled_row_is_corrected():
+    labels = ["PV1", "PV2", "PV3", "PV4", "PV5", "PV6", "PV6", "PV8", "PV9"]   # PV7 written as PV6
+    res = import_inverter(csv(LONG + _long_day("03.09.2026", [1, 2, 3, 0, 5, 6, 7, 8, 9], labels)))
+    assert res.ok and res.df.loc[0, "PV7"] == 7 and res.df.loc[0, "PV6"] == 6
+    assert any("Corrected" in w for w in res.warnings)
+
+
+def test_long_format_ambiguous_duplicate_is_refused():
+    labels = INVERTER_IDS + ["PV5"]                                   # ten rows: nothing is missing
+    res = import_inverter(csv(LONG + _long_day("03.09.2026", list(range(10)), labels)))
+    assert not res.ok and "appears twice" in res.errors[0]
+
+
+def test_build_period_mixed_months_keeps_date_types():
+    inv, ht, bill = _sep_real()
+    for c, v in (("day", ""), ("weather", ""), ("temp_c", float("nan")), ("wind_ms", float("nan"))):
+        inv[c] = v
+    aug = pd.DataFrame({"date": pd.date_range("2026-08-01", "2026-08-05"), "Total": 3000.0, "day": "",
+                        "weather": "", "temp_c": float("nan"), "wind_ms": float("nan")})
+    lt = pd.DataFrame(columns=["period", "from_date", "to_date", "opening", "closing", "units", "kwh", "note"])
+    ht2 = ht.assign(import_kwh=0.0, net_import_kwh=0.0)
+    l, h, daily, _, bm = build_period(pd.concat([aug, inv], ignore_index=True), lt, ht2, {"2026-09": bill},
+                                      pd.Timestamp("2026-08-01"), pd.Timestamp("2026-09-30"))
+    assert str(l["from_date"].dtype).startswith("datetime64") and str(h["date"].dtype).startswith("datetime64")
+    assert bm == ["2026-09"] and round(l["kwh"].sum()) == 91290
