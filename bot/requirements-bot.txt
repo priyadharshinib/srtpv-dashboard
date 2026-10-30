@@ -1,0 +1,7 @@
+# Lighter install for the scheduled bot (no Streamlit/Plotly needed)
+pandas>=2.2
+openpyxl>=3.1
+SQLAlchemy>=2.0
+psycopg[binary]>=3.2
+python-dotenv>=1.0
+requests>=2.31

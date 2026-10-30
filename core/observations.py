@@ -84,3 +84,35 @@ def takeaway(kpis: dict, inv: pd.DataFrame) -> str:
     if not outages.empty:
         text += f" The plant was largely off on {', '.join(_d(d) for d in outages)}."
     return text
+
+
+def inverter_issues(inv: pd.DataFrame, period_word: str = "month") -> list[str]:
+    """Clauses such as 'PV4 was offline for most of the month' (empty in the Avg View)."""
+    from core.calculations import flagged_cells
+    from core.config import INVERTER_IDS, OFFLINE_FRACTION
+
+    out, n = [], len(inv)
+    if not n:
+        return out
+    day_median = inv[INVERTER_IDS].median(axis=1)
+    offline = inv[INVERTER_IDS].lt(day_median * OFFLINE_FRACTION, axis=0)
+    weak = flagged_cells(inv)
+    ratios = inverter_totals(inv).set_index("inverter")["vs_others"]
+    for p in INVERTER_IDS:
+        if offline[p].sum() >= n / 2:
+            out.append(f"{p} was offline for most of the {period_word}")
+        elif weak[p].sum() >= n / 2:
+            out.append(f"{p} ran well below the other inverters for most of the {period_word}")
+        elif ratios[p] < LOW_INVERTER_RATIO:
+            out.append(f"{p} produced {ratios[p]:.0%} of the other inverters' average")
+    return out
+
+
+def glance_headline(kpis: dict, inv: pd.DataFrame, period_word: str = "month",
+                    include_outages: bool = True) -> str:
+    """'Solar covered 23% of site consumption; PV4 was offline for most of the month'."""
+    parts = [f"Solar covered {kpis['solar_share']:.0%} of site consumption", *inverter_issues(inv, period_word)]
+    outages = inv.loc[outage_mask(inv), "date"]
+    if include_outages and not outages.empty:
+        parts.append(f"the plant was largely off on {', '.join(_d(d) for d in outages)}")
+    return "; ".join(parts)

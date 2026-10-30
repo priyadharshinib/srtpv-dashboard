@@ -5,6 +5,7 @@ the data must not be saved. `warnings` are shown to the user but allowed.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,7 +48,9 @@ def read_table(file) -> pd.DataFrame:
 def _parse_dates(series: pd.Series) -> pd.Series:
     """Accept ISO dates (2026-10-01), Excel dates, or Indian style 01-10-2026."""
     iso = pd.to_datetime(series, format="ISO8601", errors="coerce")
-    fallback = pd.to_datetime(series, dayfirst=True, errors="coerce")
+    with warnings.catch_warnings():           # ISO dates already parsed above; this only handles 01-10-2026 style
+        warnings.simplefilter("ignore", UserWarning)
+        fallback = pd.to_datetime(series, dayfirst=True, errors="coerce")
     return iso.fillna(fallback).dt.normalize()
 
 
@@ -82,7 +85,13 @@ def _check_dates(df: pd.DataFrame, col: str, errors: list[str]) -> None:
 # ---------- inverter sheet ----------
 
 def import_inverter(file) -> ImportResult:
-    """Columns: date, PV1..PV9, optional Total, temp_c, weather, wind_ms, day."""
+    """Columns: date, PV1..PV9, optional Total, temp_c, weather, wind_ms, day.
+
+    Missing PV readings are filled (see core.estimation) and flagged as estimated;
+    a day with no inverter readings at all is left out and shown as "no data".
+    """
+    from core.estimation import fill_missing_inverters
+
     df = read_table(file)
     res = ImportResult(df)
     missing = _missing(df, ["date", *INVERTER_IDS])
@@ -92,8 +101,7 @@ def import_inverter(file) -> ImportResult:
 
     df = df.dropna(subset=["date"]).copy()
     _check_dates(df, "date", res.errors)
-    _to_numeric(df, INVERTER_IDS, res.errors)
-    _check_blanks(df, INVERTER_IDS, "date", res.errors)
+    _to_numeric(df, INVERTER_IDS, res.errors)          # text such as "abc" is still an error
     for opt in ("temp_c", "wind_ms"):
         if opt in df.columns:
             _to_numeric(df, [opt], res.errors)
@@ -106,26 +114,35 @@ def import_inverter(file) -> ImportResult:
     dupes = df.loc[df["date"].duplicated(), "date"]
     if not dupes.empty:
         res.errors.append(f"Duplicate dates: {[d.date().isoformat() for d in dupes]}")
-
     neg = (df[INVERTER_IDS] < 0).any(axis=1)
     if neg.any():
         res.errors.append(f"Negative inverter kWh on {df.loc[neg, 'date'].dt.date.tolist()}")
+    if res.errors:
+        return res
 
-    computed = df[INVERTER_IDS].sum(axis=1).round(2)
+    sheet_total = None
     if "Total" in df.columns:
         _to_numeric(df, ["Total"], res.errors)
-        diff = (df["Total"] - computed).abs()
-        bad = df.loc[diff > TOTAL_MISMATCH_KWH, "date"]
+        sheet_total = df["Total"].copy()
+        complete = df[INVERTER_IDS].notna().all(axis=1)
+        diff = (df["Total"] - df[INVERTER_IDS].sum(axis=1)).abs()
+        bad = df.loc[complete & df["Total"].notna() & (diff > TOTAL_MISMATCH_KWH), "date"]
         if not bad.empty:
-            res.warnings.append(
-                f"Sheet Total differs from PV1–PV9 sum on {bad.dt.date.tolist()}; using the sum"
-            )
-    df["Total"] = computed
-    df["day"] = df["date"].dt.strftime("%a")
+            res.warnings.append(f"Sheet Total differs from PV1–PV9 sum on {bad.dt.date.tolist()}; using the sum")
 
-    res.df = df.sort_values("date").reset_index(drop=True)[
-        ["date", "day", *INVERTER_IDS, "Total", "temp_c", "weather", "wind_ms"]
-    ]
+    df = df.sort_values("date").reset_index(drop=True)
+    if sheet_total is not None:
+        sheet_total = df["Total"]
+    filled, nodata, notes = fill_missing_inverters(df, sheet_total)
+    if notes:
+        res.warnings.append(f"Filled {sum(filled[[f'est_{p}' for p in INVERTER_IDS]].sum())} missing "
+                            f"reading(s), marked as estimated: " + "; ".join(notes))
+    if nodata:
+        res.warnings.append(f"No inverter data on {', '.join(d.strftime('%d %b') for d in nodata)}: "
+                            "shown as no data (estimated from the LT meter in the report)")
+    filled["day"] = filled["date"].dt.strftime("%a")
+    res.df = filled[["date", "day", *INVERTER_IDS, "Total", "temp_c", "weather", "wind_ms",
+                     *[f"est_{p}" for p in INVERTER_IDS]]]
     return res
 
 

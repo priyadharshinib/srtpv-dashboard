@@ -1,9 +1,9 @@
 """Login with Supabase Auth (email + password) and app roles.
 
-Roles:
-  admin         - backend user: full report, losses, EB/PF, import data, manage users, edit notes
-  site_manager  - readings and summarised data; imports data (no analysis, no user management)
-  customer      - averages only (average of all inverters, average daily figures)
+Roles (internal key -> name shown in the app):
+  admin         - Asase O&M Manager: dashboard in Actuals or Avg view, import, users, notes
+  site_manager  - Asase O&M Executive: O&M dashboard (Actuals), import
+  customer      - Customer: dashboard in Avg view only (see core/views.py)
 Anyone who can log in to Supabase but has no role gets no access.
 """
 from __future__ import annotations
@@ -15,9 +15,9 @@ from core.settings import get_setting
 
 ROLES = ["admin", "site_manager", "customer"]
 ROLE_LABELS = {
-    "admin": "Backend user (full access)",
-    "site_manager": "Site manager (readings, summary, import)",
-    "customer": "Customer (averages)",
+    "admin": "Asase O&M Manager",
+    "site_manager": "Asase O&M Executive",
+    "customer": "Customer",
 }
 
 

@@ -104,9 +104,16 @@ def test_ht_net_computed():
     assert res.ok and res.df.loc[0, "net_import_kwh"] == 5652
 
 
-def test_blank_or_na_inverter_value_rejected():
-    res = import_inverter(csv(INV_HEADER + "2026-10-01,1,1,1,1,n/a,1,1,1,1,9\n"))
-    assert not res.ok and any("PV5" in e for e in res.errors)
+def test_blank_or_na_inverter_value_is_filled_and_flagged():
+    res = import_inverter(csv(INV_HEADER + "2026-10-01,1,1,1,1,n/a,1,1,1,1,9\n"
+                                         "2026-10-02,1,1,1,1,1,1,1,1,1,9\n"))
+    assert res.ok
+    assert res.df.loc[0, "PV5"] == 1 and bool(res.df.loc[0, "est_PV5"])
+    assert any("estimated" in w for w in res.warnings)
+
+
+def test_text_in_inverter_column_still_rejected():
+    assert not import_inverter(csv(INV_HEADER + "2026-10-01,1,1,1,1,abc,1,1,1,1,9\n")).ok
 
 
 # ---------- filters ----------
@@ -182,3 +189,177 @@ def test_customer_averages(sample):
     a = customer_averages(*sample)
     assert a["days"] == 13
     assert a["avg_per_inverter_daily"] == pytest.approx(40617.29 / 13 / 9, abs=0.01)
+
+
+# ---------- Actuals vs Avg view (AVG-VIEW: delete these tests when the Avg View is retired) ----------
+
+from core.config import INVERTER_IDS
+from core.views import ACTUALS, AVG, apply_view, views_for
+
+
+def test_role_views(monkeypatch):
+    monkeypatch.setattr("core.views.get_setting", lambda *a, **k: None)
+    assert views_for("admin") == [ACTUALS, AVG]
+    assert views_for("site_manager") == [ACTUALS]
+    assert views_for("customer") == [AVG]
+
+
+def test_avg_view_can_be_switched_off(monkeypatch):
+    monkeypatch.setattr("core.views.get_setting", lambda *a, **k: "false")
+    assert views_for("customer") == [ACTUALS]
+    assert views_for("admin") == [ACTUALS]
+
+
+def test_avg_view_changes_only_inverter_columns(sample):
+    inv, lt, ht = sample
+    avg = apply_view(inv, AVG)
+    other = [c for c in inv.columns if c not in INVERTER_IDS]
+    pd.testing.assert_frame_equal(avg[other], inv[other])
+    assert (avg[INVERTER_IDS].sum(axis=1) - inv["Total"]).abs().max() < 1e-9
+    assert headline_kpis(avg, lt, ht) == headline_kpis(inv, lt, ht)
+    assert apply_view(inv, ACTUALS) is inv
+
+
+def test_glance_headline_names_inverter_only_in_actuals(sample):
+    from core.observations import glance_headline
+    inv, lt, ht = sample
+    k = headline_kpis(inv, lt, ht)
+    actual = glance_headline(k, inv)
+    assert actual.startswith("Solar covered 27% of site consumption")
+    assert "PV4" in actual and "11 Oct" in actual
+    assert "PV4" not in glance_headline(k, apply_view(inv, AVG))
+
+
+# ---------- HT bill ----------
+
+from core.billing import demand_headline, demand_pct, demand_story, inr
+
+
+def test_inr_indian_grouping():
+    assert inr(2979191) == "₹29,79,191"
+    assert inr(74664) == "₹74,664"
+    assert inr(175490) == "₹1,75,490"
+    assert inr(950) == "₹950"
+
+
+def test_demand_headline_and_story_match_september_bill():
+    dates = pd.date_range("2026-09-02", "2026-09-30")
+    inv = pd.DataFrame({"date": dates, "Total": 3136.14, "weather": "Partly Cloudy"})
+    rain = inv["date"] == pd.Timestamp("2026-09-29")
+    inv.loc[rain, "Total"] = 494.09
+    inv.loc[rain, "weather"] = "Moderate Rain"
+    bill = {"max_demand_kva": 1195.8, "contract_demand_kva": 1200, "md_at": pd.Timestamp("2026-09-29 10:30")}
+    assert demand_pct(1195.8, 1200) == 99.6
+    assert demand_headline(bill, inv) == ("Maximum demand came within 0.4% of contract demand, "
+                                          "on the month's weakest solar day")
+    assert demand_story(bill, inv, "September") == (
+        "The 1,195.8 kVA peak was set at 10:30 on 29 Sep. Rain held the inverters to 494 kWh that day, "
+        "against a September median of about 3,136 kWh, so almost the whole morning load came from the grid.")
+
+
+
+# ---------- missing readings, bill spreading, report layout ----------
+
+from core.estimation import bill_daily, fill_missing_inverters
+from core.report import build_period, daily_headline, short_weather
+
+
+def _sep_real():
+    """September 2026 as in the AECIPL monthly report (02-30 Sep inverter totals; 01 Sep no data)."""
+    totals = [2583.28, 2168.93, 1833.12, 4079.12, 1924.93, 5224.95, 4890.78, 3051.03, 2727.96, 3877.02, 4633.92,
+              3517.26, 2173.51, 3619.27, 5283.56, 4161.66, 2502.68, 4499.61, 3322.87, 1005.29, 4241.12, 3053.50,
+              3806.66, 3136.14, 3089.21, 2305.96, 4541.35, 494.09, 2461.08]
+    dates = pd.date_range("2026-09-02", "2026-09-30")
+    inv = pd.DataFrame({"date": dates, "Total": totals})
+    exp = {5: 213, 6: 269, 12: 242, 13: 492, 19: 234, 20: 466, 26: 161, 27: 323}
+    ht = pd.DataFrame({"date": pd.date_range("2026-09-01", "2026-09-30")})
+    ht["export_kwh"] = ht["date"].dt.day.map(exp).fillna(0.0)
+    ht["power_factor"] = float("nan")
+    bill = {"lt_kwh": 304.3 * 300, "ht_import_kwh": 307494, "ht_export_kwh": 2400}
+    return inv, ht, bill
+
+
+def test_bill_spread_reproduces_report():
+    inv, ht, bill = _sep_real()
+    d = bill_daily(inv, ht, bill, "2026-09").set_index(pd.date_range("2026-09-01", "2026-09-30").day)
+    assert round(d.loc[1, "lt_kwh"]) == 3043 and round(d.loc[1, "inverter_est"]) == 3249
+    assert round(d.loc[2, "lt_kwh"]) == 2420 and round(d.loc[2, "ht_import_kwh"]) == 11623
+    assert round(d.loc[5, "site_load_kwh"]) == 11896 and round(d.loc[5, "ht_import_kwh"]) == 8288
+    assert round(d["lt_kwh"].sum()) == 91290 and round(d["ht_import_kwh"].sum()) == 307494
+    assert round(d["site_load_kwh"].sum()) == 396384
+
+
+def test_fill_missing_matches_day_total():
+    rows = [{"date": pd.Timestamp(2026, 9, d), **{p: 100.0 + i for i, p in enumerate(INVERTER_IDS)}} for d in (1, 2, 3)]
+    inv = pd.DataFrame(rows)
+    sheet_total = inv[INVERTER_IDS].sum(axis=1)
+    inv.loc[1, "PV3"] = float("nan")
+    inv.loc[2, INVERTER_IDS] = float("nan")
+    sheet_total[2] = float("nan")
+    filled, nodata, notes = fill_missing_inverters(inv, sheet_total)
+    assert filled.loc[1, "PV3"] == 102.0 and bool(filled.loc[1, "est_PV3"])
+    assert nodata == [pd.Timestamp(2026, 9, 3)] and len(filled) == 2
+
+
+def test_report_headline_and_weather_labels():
+    inv, ht, bill = _sep_real()
+    inv["weather"] = "Cloudy"
+    inv.loc[inv["date"].dt.day.isin([21, 29]), "weather"] = "Cloudy / Rain"
+    assert daily_headline(inv, [pd.Timestamp("2026-09-01")]) == (
+        "Best days were 16 and 07 Sep; rain on 21 and 29 Sep cut output sharply. 01 Sep has no inverter data.")
+    assert short_weather("Partly cloudy / Mainly sunny") == "Sunny spells"
+    assert short_weather("Light Rain / Thunderstorm") == "Thunder"
+    assert short_weather("Scattered Clouds / Partly Cloudy") == "Partly cloudy"
+
+
+def test_build_period_keeps_no_data_day_in_bill_totals():
+    inv, ht, bill = _sep_real()
+    for c, v in (("day", ""), ("weather", ""), ("temp_c", float("nan")), ("wind_ms", float("nan"))):
+        inv[c] = v
+    lt = pd.DataFrame({c: pd.Series(dtype="datetime64[ns]" if "date" in c else float)
+                       for c in ["from_date", "to_date", "kwh", "opening", "closing", "units"]})
+    ht2 = ht.assign(import_kwh=0.0, net_import_kwh=0.0)
+    l, h, daily, nodata, bm = build_period(inv, lt, ht2, {"2026-09": bill},
+                                           pd.Timestamp("2026-09-01"), pd.Timestamp("2026-09-30"))
+    assert bm == ["2026-09"] and nodata == [pd.Timestamp("2026-09-01")] and len(daily) == 30
+    assert round(l["kwh"].sum()) == 91290 and round(h["import_kwh"].sum()) == 307494
+
+
+# ---------- importing a month in parts ----------
+
+from core.batches import ADD_NEW, REPLACE, prepare_batch, ranges
+
+
+def test_second_half_of_month_is_appended():
+    first = pd.DataFrame({"date": pd.date_range("2026-10-01", "2026-10-15")})
+    second = pd.DataFrame({"date": pd.date_range("2026-10-14", "2026-10-31")})
+    df, errors, notes = prepare_batch("inverter", second, "2026-10", list(first["date"]), ADD_NEW)
+    assert not errors and len(df) == 18 - 2 and df["date"].min() == pd.Timestamp("2026-10-16")
+    df, errors, notes = prepare_batch("inverter", second, "2026-10", list(first["date"]), REPLACE)
+    assert len(df) == 18 and any("Replaced 2" in n for n in notes)
+
+
+def test_rows_outside_chosen_month_are_refused():
+    df = pd.DataFrame({"date": pd.date_range("2026-09-30", "2026-10-02")})
+    saved, errors, _ = prepare_batch("ht", df, "2026-10", [])
+    assert saved.empty and "outside October 2026" in errors[0]
+
+
+def test_lt_batch_checks_continuity():
+    lt = pd.DataFrame({"from_date": pd.to_datetime(["2026-10-16"]), "to_date": pd.to_datetime(["2026-10-16"]),
+                       "opening": [120.0], "closing": [130.0]})
+    _, _, notes = prepare_batch("lt", lt, "2026-10", [], last_lt_closing=118.0)
+    assert any("does not match" in n for n in notes)
+
+
+def test_ranges_text():
+    days = list(pd.date_range("2026-10-01", "2026-10-03")) + [pd.Timestamp("2026-10-05")]
+    assert ranges(days) == "01–03 Oct, 05 Oct"
+
+
+def test_customer_headline_has_no_outage_clause(sample):
+    from core.observations import glance_headline
+    inv, lt, ht = sample
+    k = headline_kpis(inv, lt, ht)
+    assert "largely off" in glance_headline(k, inv)
+    assert "largely off" not in glance_headline(k, apply_view(inv, AVG), include_outages=False)

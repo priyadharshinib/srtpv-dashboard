@@ -139,3 +139,80 @@ def customer_daily(inv: pd.DataFrame) -> go.Figure:
     fig.add_hline(y=float(avg.mean()), line_dash="dot", line_color=ORANGE,
                   annotation_text=f"period average {avg.mean():,.0f} kWh", annotation_position="top left")
     return _layout(fig, 340)
+
+
+# ---------------------------------------------------------------------
+# Report-style charts (asase.energy monthly report colours)
+# ---------------------------------------------------------------------
+R_AMBER, R_RED, R_GREY, R_TEAL = "#E5A01A", "#C0392B", "#D5DBE3", "#2A9D8F"
+R_NAVY, R_CORAL, R_INK, R_GRID = "#3D5A80", "#E07B5F", "#5B6B7B", "rgba(91,107,123,0.18)"
+
+
+def _r_layout(fig: go.Figure, height: int) -> go.Figure:
+    fig.update_layout(height=height, margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="rgba(0,0,0,0)",
+                      paper_bgcolor="rgba(0,0,0,0)", font=dict(color=R_INK, size=12), bargap=0.25,
+                      legend=dict(orientation="h", y=1.12, x=1, xanchor="right"), hovermode="x unified")
+    fig.update_yaxes(gridcolor=R_GRID, tickformat=",.0f", zeroline=False)
+    fig.update_xaxes(showgrid=False, type="category")
+    return fig
+
+
+def report_daily_chart(daily: pd.DataFrame) -> go.Figure:
+    from core.report import very_low_mask
+
+    x = daily["date"].dt.strftime("%d")
+    actual = daily["inverter_kwh"]
+    low = very_low_mask(actual.dropna()).reindex(daily.index, fill_value=False)
+    fig = go.Figure()
+    fig.add_bar(x=x, y=daily["inverter_est"].where(daily["no_data"]), name="No data, estimated (kWh)",
+                marker_color=R_GREY, hovertemplate="%{y:,.0f} kWh (estimated)<extra></extra>")
+    fig.add_bar(x=x, y=actual.where(low), name="Very low day (kWh)", marker_color=R_RED,
+                hovertemplate="%{y:,.0f} kWh<extra></extra>")
+    fig.add_bar(x=x, y=actual.where(~low), name="Inverter total (kWh)", marker_color=R_AMBER,
+                hovertemplate="%{y:,.0f} kWh<extra></extra>")
+    fig.update_layout(barmode="overlay")
+    return _r_layout(fig, 360)
+
+
+def inverter_vs_lt_chart(daily: pd.DataFrame, lt_estimated: bool) -> go.Figure:
+    x = daily["date"].dt.strftime("%d")
+    fig = go.Figure()
+    fig.add_scatter(x=x, y=daily["inverter_kwh"], name="Inverter (actual)", mode="lines+markers",
+                    line=dict(color=R_AMBER, width=2.5), marker=dict(size=7), connectgaps=False)
+    fig.add_scatter(x=x, y=daily["lt_kwh"], name="LT meter (daily estimate)" if lt_estimated else "LT meter",
+                    mode="lines+markers", line=dict(color=R_TEAL, width=2.5), marker=dict(size=7))
+    return _r_layout(fig, 400)
+
+
+def month_total_chart(totals: pd.DataFrame) -> go.Figure:
+    from core.config import INVERTER_SHORT
+
+    t = totals.iloc[::-1]
+    fig = go.Figure(go.Bar(
+        x=t["kwh"], y=[f"{p} · {INVERTER_SHORT.get(p, '')}" for p in t["inverter"]], orientation="h",
+        marker_color=R_AMBER, text=t["kwh"].map("{:,.0f}".format), textposition="inside",
+        insidetextanchor="end", textfont=dict(color="white"), hovertemplate="%{x:,.0f} kWh<extra></extra>"))
+    fig = _r_layout(fig, 420)
+    fig.update_xaxes(type="linear", showgrid=False, showticklabels=False)
+    fig.update_yaxes(type="category", gridcolor="rgba(0,0,0,0)")
+    fig.update_layout(hovermode="closest", bargap=0.3)
+    return fig
+
+
+def grid_exchange_report(daily: pd.DataFrame) -> go.Figure:
+    x = daily["date"].dt.strftime("%d")
+    exp = daily["ht_export_kwh"].fillna(0)
+    weekends_only = bool(exp.gt(0).any()) and bool((daily.loc[exp > 0, "date"].dt.dayofweek >= 5).all())
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=False, row_heights=[0.68, 0.32], vertical_spacing=0.16,
+                        subplot_titles=("Daily import (kWh)",
+                                        "Daily export (kWh)" + (", weekends only" if weekends_only else "")))
+    fig.add_bar(x=x, y=daily["ht_import_kwh"], marker_color=R_NAVY, name="Import",
+                hovertemplate="%{y:,.0f} kWh<extra>Import</extra>", row=1, col=1)
+    fig.add_bar(x=x, y=exp.where(exp > 0), marker_color=R_CORAL, name="Export",
+                text=exp.where(exp > 0).map(lambda v: "" if pd.isna(v) else f"{v:,.0f}"),
+                textposition="outside", hovertemplate="%{y:,.0f} kWh<extra>Export</extra>", row=2, col=1)
+    fig = _r_layout(fig, 430)
+    fig.update_layout(showlegend=False, hovermode="closest")
+    fig.update_annotations(font=dict(size=13, color=R_INK))
+    fig.update_yaxes(range=[0, max(float(exp.max()) * 1.35, 1)], row=2, col=1)
+    return fig

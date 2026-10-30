@@ -1,6 +1,9 @@
 """Plant-specific settings. Change these, not the calculation code."""
 
-PLANT_NAME = "SRTPV plant"
+PLANT_NAME = "SRTPV RRMCH Plant One"
+PLANT_SHORT = "SRTPV plant"
+BRAND = "asase.energy"
+CONFIDENTIAL = "CONFIDENTIAL — FOR INTERNAL USE ONLY"
 PLANT_CAPACITY_KWP = 984.5
 
 # Inverter id -> roof/location shown on the dashboard
@@ -41,3 +44,33 @@ WEATHER_GROUPS = ["Sunny", "Partly cloudy", "Cloudy", "Rain / storm", "Not recor
 AC_LOSS_EXPECTED = (0.01, 0.04)   # 1-4% is normal for cables, transformer-less AC run and panel losses
 # Power factor at the HT / EB meter
 PF_LIMIT = 0.90                   # days below this are flagged (check your tariff's PF limit)
+
+# Plant location for automatic weather (Kambipura, Bengaluru - approximate; refine from Google Maps)
+PLANT_LAT = 12.89
+PLANT_LON = 77.47
+PLANT_TIMEZONE = "Asia/Kolkata"
+
+# TEMPORARY Avg View (see core/views.py). Set to False, or set the secret
+# AVG_VIEW_ENABLED = "false", to switch it off everywhere without a code change.
+AVG_VIEW_ENABLED = True
+
+# "At a glance" labels: LT and HT figures come from the monthly bill readings
+METER_FIGURES_FROM_BILL = True
+OFFLINE_FRACTION = 0.10      # inverter below 10% of the day's median inverter = offline that day
+
+# HT bill
+CONTRACT_DEMAND_KVA = 1200.0
+DEFAULT_EXPORT_NOTE = "Netted against import, no cash credit"
+
+# Short roof names for charts ("PV1 · Auditorium")
+INVERTER_SHORT = {
+    "PV1": "Auditorium", "PV2": "Auditorium", "PV3": "Auditorium",
+    "PV4": "College", "PV5": "College", "PV6": "College",
+    "PV7": "Hospital Roof 2", "PV8": "Hospital Roof 1", "PV9": "Hospital Annex",
+}
+
+# A day below this share of the month's median inverter total is a "very low day" (red)
+VERY_LOW_FRACTION = 0.35
+
+# Spreading the monthly bill over days: site load by day type, scaled to the bill total
+SITE_LOAD_WEIGHTS = {"weekday": 1.0, "Sat": 0.8471, "Sun": 0.7097}

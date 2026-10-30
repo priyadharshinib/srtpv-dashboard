@@ -11,7 +11,7 @@ import datetime as dt
 from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import Date, Float, String, Text, create_engine, delete, select, text
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text, create_engine, delete, select, text, update
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from core.config import INVERTER_IDS
@@ -53,6 +53,7 @@ class InverterReading(Base):
     date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
     inverter: Mapped[str] = mapped_column(String(10), primary_key=True)
     kwh: Mapped[float] = mapped_column(Float)
+    estimated: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class DailyWeather(Base):
@@ -85,6 +86,28 @@ class HtMeterDaily(Base):
     note: Mapped[str] = mapped_column(Text, default="")
 
 
+class MonthlyBill(Base):
+    """Figures from the monthly HT (BESCOM) bill. One row per month, e.g. '2026-09'."""
+    __tablename__ = "monthly_bills"
+    month: Mapped[str] = mapped_column(String(7), primary_key=True)
+    net_payable: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pf_penalty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adjustment_label: Mapped[str] = mapped_column(String(100), default="")
+    adjustment_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_pf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_demand_kva: Mapped[float | None] = mapped_column(Float, nullable=True)
+    md_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    contract_demand_kva: Mapped[float | None] = mapped_column(Float, nullable=True)
+    export_note: Mapped[str] = mapped_column(Text, default="")
+    lt_units: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lt_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ht_import_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ht_export_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    meter_note: Mapped[str] = mapped_column(Text, default="")
+    inverter_note_title: Mapped[str] = mapped_column(Text, default="")
+    inverter_note_body: Mapped[str] = mapped_column(Text, default="")
+
+
 class MonthNote(Base):
     """Free-text engineering notes per month, e.g. '2026-10'."""
     __tablename__ = "month_notes"
@@ -100,6 +123,20 @@ class AppUser(Base):
     role: Mapped[str] = mapped_column(String(20), default="customer")
 
 
+class ImportLog(Base):
+    """Every import attempt, from the app or the email bot."""
+    __tablename__ = "import_log"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(20))          # "app" or "email-bot"
+    username: Mapped[str] = mapped_column(String(255))
+    file: Mapped[str] = mapped_column(String(255))
+    kind: Mapped[str] = mapped_column(String(20))            # Inverter / LT meter / HT meter / unknown
+    status: Mapped[str] = mapped_column(String(20))          # saved / refused / skipped
+    rows: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str] = mapped_column(Text, default="")
+
+
 def init_db() -> None:
     if IS_POSTGRES:
         with engine.begin() as conn:
@@ -110,17 +147,29 @@ def init_db() -> None:
     _migrate()
 
 
+NEW_COLUMNS = [  # (table, column, postgres type, sqlite type)
+    ("ht_meter_daily", "power_factor", "double precision", "FLOAT"),
+    ("inverter_readings", "estimated", "boolean DEFAULT false", "BOOLEAN DEFAULT 0"),
+    ("monthly_bills", "lt_units", "double precision", "FLOAT"),
+    ("monthly_bills", "lt_kwh", "double precision", "FLOAT"),
+    ("monthly_bills", "ht_import_kwh", "double precision", "FLOAT"),
+    ("monthly_bills", "ht_export_kwh", "double precision", "FLOAT"),
+    ("monthly_bills", "meter_note", "text DEFAULT ''", "TEXT DEFAULT ''"),
+    ("monthly_bills", "inverter_note_title", "text DEFAULT ''", "TEXT DEFAULT ''"),
+    ("monthly_bills", "inverter_note_body", "text DEFAULT ''", "TEXT DEFAULT ''"),
+]
+
+
 def _migrate() -> None:
     """Add columns introduced after the first release to existing tables."""
-    if IS_POSTGRES:
-        with engine.begin() as conn:
-            conn.execute(text(f'ALTER TABLE "{DB_SCHEMA}".ht_meter_daily '
-                              'ADD COLUMN IF NOT EXISTS power_factor double precision'))
-    else:
-        with engine.begin() as conn:
-            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(ht_meter_daily)"))]
-            if "power_factor" not in cols:
-                conn.execute(text("ALTER TABLE ht_meter_daily ADD COLUMN power_factor FLOAT"))
+    with engine.begin() as conn:
+        for table, col, pg_type, lite_type in NEW_COLUMNS:
+            if IS_POSTGRES:
+                conn.execute(text(f'ALTER TABLE "{DB_SCHEMA}".{table} ADD COLUMN IF NOT EXISTS {col} {pg_type}'))
+            else:
+                cols = [r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))]
+                if col not in cols:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {lite_type}"))
 
 
 def database_label() -> str:
@@ -141,7 +190,8 @@ def save_inverter(inv: pd.DataFrame) -> None:
         s.execute(delete(DailyWeather).where(DailyWeather.date.in_(dates)))
         for _, r in inv.iterrows():
             d = r["date"].date()
-            s.add_all(InverterReading(date=d, inverter=p, kwh=float(r[p])) for p in INVERTER_IDS)
+            s.add_all(InverterReading(date=d, inverter=p, kwh=float(r[p]),
+                                      estimated=bool(r.get(f"est_{p}", False))) for p in INVERTER_IDS)
             s.add(DailyWeather(date=d, temp_c=_nan_to_none(r["temp_c"]),
                                weather=r["weather"] or None, wind_ms=_nan_to_none(r["wind_ms"])))
 
@@ -200,7 +250,7 @@ def load_month(month: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 def load_range(start: dt.date, end: dt.date) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     with Session(engine) as s:
         readings = s.execute(
-            select(InverterReading.date, InverterReading.inverter, InverterReading.kwh)
+            select(InverterReading.date, InverterReading.inverter, InverterReading.kwh, InverterReading.estimated)
             .where(InverterReading.date.between(start, end))
         ).all()
         weather = s.execute(
@@ -215,14 +265,22 @@ def load_range(start: dt.date, end: dt.date) -> tuple[pd.DataFrame, pd.DataFrame
             select(HtMeterDaily).where(HtMeterDaily.date.between(start, end)).order_by(HtMeterDaily.date)
         ).all()
 
-    long = pd.DataFrame(readings, columns=["date", "inverter", "kwh"])
+    long = pd.DataFrame(readings, columns=["date", "inverter", "kwh", "estimated"])
+    long["estimated"] = long["estimated"].fillna(False).astype(bool)
     inv = long.pivot(index="date", columns="inverter", values="kwh").reindex(columns=INVERTER_IDS).reset_index()
+    est = (long.pivot(index="date", columns="inverter", values="estimated").reindex(columns=INVERTER_IDS)
+           .fillna(False).astype(bool).add_prefix("est_").reset_index())
     inv = inv.merge(pd.DataFrame(weather, columns=["date", "temp_c", "weather", "wind_ms"]), on="date", how="left")
     inv["date"] = pd.to_datetime(inv["date"])
     inv["day"] = inv["date"].dt.strftime("%a")
     inv["Total"] = inv[INVERTER_IDS].sum(axis=1).round(2)
     inv["weather"] = inv["weather"].fillna("")
-    inv = inv[["date", "day", *INVERTER_IDS, "Total", "temp_c", "weather", "wind_ms"]].sort_values("date")
+    est["date"] = pd.to_datetime(est["date"])          # same date type as inv before joining
+    inv = inv.merge(est, on="date", how="left")
+    for p in INVERTER_IDS:
+        inv[f"est_{p}"] = inv[f"est_{p}"].fillna(False).astype(bool) if f"est_{p}" in inv else False
+    inv = inv[["date", "day", *INVERTER_IDS, "Total", "temp_c", "weather", "wind_ms",
+               *[f"est_{p}" for p in INVERTER_IDS]]].sort_values("date")
 
     lt = pd.DataFrame([{
         "period": r.period, "from_date": pd.Timestamp(r.from_date), "to_date": pd.Timestamp(r.to_date),
@@ -267,3 +325,93 @@ def save_user(email: str, name: str, role: str) -> None:
 def remove_user(email: str) -> None:
     with Session(engine) as s, s.begin():
         s.execute(delete(AppUser).where(AppUser.email == email.lower()))
+
+
+# ---------- import log ----------
+
+def log_import(source: str, user: str, file: str, kind: str, status: str, rows: int = 0, message: str = "") -> None:
+    with Session(engine) as s, s.begin():
+        s.add(ImportLog(at=dt.datetime.now(dt.timezone.utc), source=source, username=user, file=file[:255],
+                        kind=kind, status=status, rows=rows, message=message[:2000]))
+
+
+def recent_imports(limit: int = 30) -> pd.DataFrame:
+    with Session(engine) as s:
+        rows = s.scalars(select(ImportLog).order_by(ImportLog.at.desc()).limit(limit)).all()
+    return pd.DataFrame([{
+        "when (IST)": pd.Timestamp(r.at).tz_convert("Asia/Kolkata").strftime("%d %b %Y %H:%M") if r.at.tzinfo
+                      else pd.Timestamp(r.at).strftime("%d %b %Y %H:%M"),
+        "source": r.source, "user": r.username, "file": r.file, "kind": r.kind,
+        "status": r.status, "rows": r.rows, "message": r.message,
+    } for r in rows], columns=["when (IST)", "source", "user", "file", "kind", "status", "rows", "message"])
+
+
+# ---------- automatic weather ----------
+
+def dates_missing_weather(since: dt.date) -> list[dt.date]:
+    """Days that have inverter readings but no weather text."""
+    with Session(engine) as s:
+        days = set(s.scalars(select(InverterReading.date).where(InverterReading.date >= since).distinct()).all())
+        have = set(s.scalars(select(DailyWeather.date).where(
+            DailyWeather.date >= since, DailyWeather.weather.is_not(None), DailyWeather.weather != "")).all())
+    return sorted(days - have)
+
+
+def fill_weather(rows: pd.DataFrame) -> int:
+    """rows: date, temp_c, weather, wind_ms. Only fills days whose weather is still empty."""
+    n = 0
+    with Session(engine) as s, s.begin():
+        for r in rows.itertuples():
+            d = r.date.date() if hasattr(r.date, "date") else r.date
+            w = s.get(DailyWeather, d)
+            if w is None:
+                s.add(DailyWeather(date=d, temp_c=_nan_to_none(r.temp_c), weather=r.weather,
+                                   wind_ms=_nan_to_none(r.wind_ms)))
+                n += 1
+            elif not w.weather:
+                w.weather = r.weather
+                w.temp_c = w.temp_c if w.temp_c is not None else _nan_to_none(r.temp_c)
+                w.wind_ms = w.wind_ms if w.wind_ms is not None else _nan_to_none(r.wind_ms)
+                n += 1
+    return n
+
+
+# ---------- monthly HT bill ----------
+
+BILL_FIELDS = ["net_payable", "pf_penalty", "adjustment_label", "adjustment_amount", "avg_pf",
+               "max_demand_kva", "md_at", "contract_demand_kva", "export_note",
+               "lt_units", "lt_kwh", "ht_import_kwh", "ht_export_kwh",
+               "meter_note", "inverter_note_title", "inverter_note_body"]
+
+
+def save_bill(month: str, values: dict) -> None:
+    with Session(engine) as s, s.begin():
+        s.merge(MonthlyBill(month=month, **{k: values.get(k) for k in BILL_FIELDS}))
+
+
+def load_bill(month: str) -> dict | None:
+    with Session(engine) as s:
+        b = s.get(MonthlyBill, month)
+    return {k: getattr(b, k) for k in BILL_FIELDS} if b else None
+
+
+# ---------- month coverage (for importing a month in parts) ----------
+
+def coverage(month: str) -> dict[str, list[dt.date]]:
+    """Days already saved in a month, per sheet type."""
+    start, end = _month_range(month)
+    with Session(engine) as s:
+        inv_days = s.scalars(select(InverterReading.date).where(InverterReading.date.between(start, end))
+                             .distinct()).all()
+        ht_days = s.scalars(select(HtMeterDaily.date).where(HtMeterDaily.date.between(start, end))).all()
+        lt_periods = s.execute(select(LtMeterPeriod.from_date, LtMeterPeriod.to_date)
+                               .where(LtMeterPeriod.from_date.between(start, end))).all()
+    lt_days = {d.date() for a, b in lt_periods for d in pd.date_range(a, b)}
+    return {"inverter": sorted(set(inv_days)), "lt": sorted(lt_days), "ht": sorted(set(ht_days))}
+
+
+def lt_closing_before(day: dt.date) -> float | None:
+    """Closing reading of the last LT period that ends before this day."""
+    with Session(engine) as s:
+        return s.scalar(select(LtMeterPeriod.closing).where(LtMeterPeriod.to_date < day)
+                        .order_by(LtMeterPeriod.to_date.desc()).limit(1))
