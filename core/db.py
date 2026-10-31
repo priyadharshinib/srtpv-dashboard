@@ -441,3 +441,22 @@ def clear_month(month: str, kinds: list[str]) -> dict[str, int]:
         if "bill" in kinds:
             done["bill"] = s.execute(delete(MonthlyBill).where(MonthlyBill.month == month)).rowcount
     return done
+
+
+# ---------- projected view: share per month ----------
+
+class ProjectionSetting(Base):
+    """Share of each day's total given to a chronically faulty inverter in the Projected view."""
+    __tablename__ = "projection_settings"
+    month: Mapped[str] = mapped_column(String(7), primary_key=True)
+    share: Mapped[float] = mapped_column(Float)
+
+
+def get_projection_shares() -> dict[str, float]:
+    with Session(engine) as s:
+        return {r.month: r.share for r in s.scalars(select(ProjectionSetting)).all()}
+
+
+def save_projection_share(month: str, share: float) -> None:
+    with Session(engine) as s, s.begin():
+        s.merge(ProjectionSetting(month=month, share=float(share)))

@@ -91,8 +91,19 @@ def build_period(inv: pd.DataFrame, lt: pd.DataFrame, ht: pd.DataFrame, bills: d
             days = pd.date_range(m_start, last)
             d = pd.DataFrame({"date": days})
             d = d.merge(inv_m[["date", "Total"]].rename(columns={"Total": "inverter_kwh"}), on="date", how="left")
-            one_day = lt_m[lt_m["from_date"] == lt_m["to_date"]].set_index("from_date")["kwh"]
-            d["lt_kwh"] = d["date"].map(one_day)
+            # LT per day: single-day readings as they are; a multi-day reading (e.g. a weekend)
+            # is split across its days in proportion to inverter output, so the days add up
+            # to the meter reading.
+            lt_day: dict = {}
+            inv_tot = inv_m.set_index("date")["Total"] if len(inv_m) else pd.Series(dtype=float)
+            for r in lt_m.itertuples():
+                days_r = pd.date_range(r.from_date, r.to_date)
+                w = pd.Series([float(inv_tot.get(x, np.nan)) for x in days_r], index=days_r)
+                w = w.fillna(0.0)
+                w = w / w.sum() if w.sum() > 0 else pd.Series(1 / len(days_r), index=days_r)
+                for x in days_r:
+                    lt_day[x] = float(r.kwh) * w[x]
+            d["lt_kwh"] = d["date"].map(lt_day)
             hb = ht_m.set_index("date")
             for col, src in (("ht_import_kwh", "import_kwh"), ("ht_export_kwh", "export_kwh"),
                              ("ht_net_kwh", "net_import_kwh"), ("power_factor", "power_factor")):
@@ -155,7 +166,7 @@ def followups(month_name: str | None, bill: dict | None, grid: dict, glance_inve
                       f"No inverter data for {', '.join(f'{d:%d %b}' for d in nodata)}. "
                       "Check the data logger and internet link so the next report is complete."))
     if n_estimated_cells:
-        items.append(("Projected inverter readings",
-                      f"{n_estimated_cells} faulty or blank inverter reading(s) are projected from the healthy "
-                      "inverters in the same group, and are marked p in the table."))
+        items.append(("Projected inverter split",
+                      f"On {n_estimated_cells} inverter-day(s) a share of the day's total is shown on an inverter "
+                      "that was down; marked p in the table. Day and month totals are the actual figures."))
     return items

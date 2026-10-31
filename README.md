@@ -62,10 +62,12 @@ All roles see the same dashboard. Only PV1–PV9 values differ between views.
 ## Actual and projected data
 
 - **Actuals**: inverter readings exactly as imported (a blank stays blank).
-- **Projected** (computed in the backend, never stored, `core/projection.py`): a reading that
-  is blank, below 70% of the average of the other inverters in its group, or far above them, is
-  replaced by the average of the healthy inverters in the group (Auditorium PV1–3, College
-  PV4–6, Hospital PV7–9; `PROJECTION_GROUPS` in `core/config.py`). A whole group offline stays blank.
+- **Projected** (computed in the backend, never stored, `core/projection.py`), the monthly report's
+  method: an inverter that is faulty (blank, or below 70% of the other inverters in its group) on at
+  least half of a month's days gets 10% of each day's actual total, and every inverter's reading is
+  scaled down to match. Day and month totals are always the actual figures. Reproduces the September 2026
+  report's inverter table to the cent. The share is 10% (`PROJECTION_SHARE`) unless a different share is saved for that month in the
+  app (Import data → Tools); no code changes per month. The October 2026 report used 7%.
 - O&M Manager: switch Actuals / Projected, plus an "Actual vs projected" table. O&M Executive:
   Actuals. Customer: Projected only, with no markers.
 - Turn projections off everywhere with the secret `PROJECTED_VIEW_ENABLED = "false"`.

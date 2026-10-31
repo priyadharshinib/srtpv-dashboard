@@ -209,21 +209,50 @@ def test_projected_view_can_be_switched_off(monkeypatch):
     assert views_for("customer") == [ACTUALS] and views_for("admin") == [ACTUALS]
 
 
-def test_projection_replaces_faulty_reading_with_group_average():
+def _month(pv4_values):
+    """A month of days: eight healthy inverters at 300 kWh, PV4 as given."""
+    rows = []
+    for d, v in enumerate(pv4_values, 1):
+        row = {"date": pd.Timestamp(2026, 9, d), **{p: 300.0 for p in INVERTER_IDS}}
+        row["PV4"] = v
+        rows.append(row)
+    inv = pd.DataFrame(rows)
+    inv["Total"] = inv[INVERTER_IDS].sum(axis=1)
+    return inv
+
+
+def test_projection_keeps_day_and_month_totals():
+    inv = _month([0.0] * 20 + [300.0] * 10)                       # PV4 down on 20 of 30 days
+    out, marked = project(inv)
+    assert (out[INVERTER_IDS].sum(axis=1).round(2) == inv["Total"].round(2)).all()
+    assert round(out["Total"].sum(), 2) == round(inv["Total"].sum(), 2)
+    assert out.loc[0, "PV4"] == round(0.1 * 2400, 2) and out.loc[0, "PV1"] == 270.0
+    assert marked["PV4"].all() and not marked["PV1"].any()
+
+
+def test_projection_matches_september_report_rule():
+    # 03 Sep 2026 actual readings; the report shows PV1 222.91, PV4 216.89, PV9 254.00
     row = {"date": pd.Timestamp("2026-09-03"), "PV1": 247.68, "PV2": 254.58, "PV3": 258.49, "PV4": 0.0,
            "PV5": 288.44, "PV6": 289.22, "PV7": 274.87, "PV8": 273.43, "PV9": 282.22}
-    inv = pd.DataFrame([row]); inv["Total"] = inv[INVERTER_IDS].sum(axis=1)
-    out, replaced = project(inv)
-    assert out.loc[0, "PV4"] == round((288.44 + 289.22) / 2, 2)          # (PV5 + PV6) / 2
-    assert replaced.values.sum() == 1 and out.loc[0, "PV5"] == 288.44
-    assert round(out.loc[0, "Total"], 2) == 2457.76
+    inv = pd.concat([_month([0.0] * 30).iloc[:29], pd.DataFrame([row])], ignore_index=True)
+    inv["Total"] = inv[INVERTER_IDS].sum(axis=1)
+    out, _ = project(inv)
+    r = out.iloc[-1]
+    assert (r["PV1"], r["PV4"], r["PV9"]) == (222.91, 216.89, 254.0)
+    assert round(r[INVERTER_IDS].sum(), 2) == 2168.93
+
+
+def test_month_without_chronic_fault_is_unchanged():
+    inv = _month([0.0] * 5 + [300.0] * 25)                         # PV4 down on only 5 days
+    out, marked = project(inv)
+    assert out[INVERTER_IDS].equals(inv[INVERTER_IDS]) and not marked.values.any()
 
 
 def test_projection_leaves_whole_offline_group_blank():
     row = {"date": pd.Timestamp("2026-07-29"), **{p: 150.0 for p in INVERTER_IDS[:6]},
            "PV7": float("nan"), "PV8": float("nan"), "PV9": float("nan")}
-    out, replaced = project(pd.DataFrame([row]))
-    assert out[["PV7", "PV8", "PV9"]].isna().all(axis=None) and replaced.values.sum() == 0
+    out, _ = project(pd.DataFrame([row]))
+    assert round(out[INVERTER_IDS].sum(axis=1).iloc[0], 2) == 900.0
 
 
 def test_projected_view_changes_only_inverter_columns(sample):
@@ -232,6 +261,7 @@ def test_projected_view_changes_only_inverter_columns(sample):
     other = [c for c in inv.columns if c not in INVERTER_IDS + ["Total"]]
     pd.testing.assert_frame_equal(pv[other], inv[other])
     assert pv["PV4"].sum() > inv["PV4"].sum()                          # PV4 was weak in October
+    assert round(pv["Total"].sum(), 2) == round(inv["Total"].sum(), 2)  # totals never change
     assert pv[[f"proj_{p}" for p in INVERTER_IDS]].values.sum() > 0
     assert apply_view(inv, ACTUALS)[INVERTER_IDS].equals(inv[INVERTER_IDS])
 
@@ -424,3 +454,16 @@ def test_build_period_mixed_months_keeps_date_types():
                                       pd.Timestamp("2026-08-01"), pd.Timestamp("2026-09-30"))
     assert str(l["from_date"].dtype).startswith("datetime64") and str(h["date"].dtype).startswith("datetime64")
     assert bm == ["2026-09"] and round(l["kwh"].sum()) == 91290
+
+
+def test_projection_share_is_per_month():
+    # 01 Oct 2026 actual readings; the October report shows PV1 348.93 and PV4 225.65 (7% share)
+    row = {"date": pd.Timestamp("2026-10-01"), "PV1": 375.19, "PV2": 379.6, "PV3": 376.82, "PV4": 0.0,
+           "PV5": 429.04, "PV6": 435.9, "PV7": 403.88, "PV8": 401.55, "PV9": 421.69}
+    inv = pd.DataFrame([row] * 3)
+    inv["date"] = pd.date_range("2026-10-01", periods=3)
+    inv["Total"] = inv[INVERTER_IDS].sum(axis=1)
+    out, _ = project(inv, {"2026-10": 0.07})                         # share saved in the app for October
+    assert (out.loc[0, "PV1"], out.loc[0, "PV4"]) == (348.93, 225.65)
+    out2, _ = project(inv)                                           # no saved share -> default 10%
+    assert out2.loc[0, "PV1"] == round(375.19 * 0.9, 2)

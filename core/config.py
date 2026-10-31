@@ -1,6 +1,7 @@
 """Plant-specific settings. Change these, not the calculation code."""
 
-PLANT_NAME = "SRTPV RRMCH Plant One"
+PLANT_NAME = "SRTPV DASHBOARD"
+PLANT_FULL_NAME = "SRTPV RRMCH Plant One"
 PLANT_SHORT = "SRTPV plant"
 BRAND = "asase.energy"
 CONFIDENTIAL = "CONFIDENTIAL — FOR INTERNAL USE ONLY"
@@ -75,9 +76,14 @@ VERY_LOW_FRACTION = 0.35
 # Spreading the monthly bill over days: site load by day type, scaled to the bill total
 SITE_LOAD_WEIGHTS = {"weekday": 1.0, "Sat": 0.8471, "Sun": 0.7097}
 
-# Projected view: a reading below this share of the average of the healthy inverters on the
-# same roof is treated as faulty and replaced by that average (matches the manual projected sheet)
+# Projected view (matches the monthly report's method, totals never change):
+# an inverter that is faulty on at least PROJECTION_MIN_FAULTY_DAYS of a month's days gets
+# PROJECTION_SHARE of each day's actual total; every inverter's actual reading is scaled so the
+# day total stays exactly the same. A reading is "faulty" when it is blank, or below
+# PROJECTION_THRESHOLD of the average of the other inverters in its group.
 PROJECTION_THRESHOLD = 0.70
+PROJECTION_SHARE = 0.10   # default; a different share for a month is set in the app (Import data → Tools)
+PROJECTION_MIN_FAULTY_DAYS = 0.5
 # Groups of inverters that normally produce alike (used for projection)
 PROJECTION_GROUPS = {
     "RR Auditorium": ["PV1", "PV2", "PV3"],

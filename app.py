@@ -46,12 +46,32 @@ from core.observations import glance_headline, inverter_issues
 from core.report import build_period, daily_headline, followups, month_list, short_weather, very_low_mask
 from core.settings import get_setting
 from core.views import PROJECTED, apply_view, views_for
-from core.projection import project
+from core.projection import chronic_inverters, faulty_cells, project, share_for
 from core.billing import demand_headline, demand_pct, demand_story, inr
 from core.batches import ADD_NEW, ALL_MONTHS, REPLACE, REPLACE_MONTH, coverage_text, prepare_batch, split_by_month
-from core.config import CONTRACT_DEMAND_KVA, DEFAULT_EXPORT_NOTE
+from core.config import CONTRACT_DEMAND_KVA, DEFAULT_EXPORT_NOTE, PROJECTION_SHARE
 
-st.set_page_config(page_title=f"{PLANT_NAME} report", page_icon="☀️", layout="wide")
+st.set_page_config(page_title=PLANT_NAME, page_icon="☀️", layout="wide")
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;600;700&display=swap');
+.ae-logo-top{display:flex;justify-content:center;align-items:center;gap:14px;margin:0 0 14px;flex-wrap:nowrap}
+.ae-logo-top img{max-width:62vw;height:auto}
+.ae-logo-top img.mark{height:54px;width:auto}
+.ae-logo-top img.word{height:44px;width:auto}
+.ae-title{font-family:'Source Serif 4',Cambria,Georgia,serif;font-weight:700;color:#1C2B3A;
+          text-align:center;font-size:2.4rem;line-height:1.15;margin:0}
+.ae-subtitle{font-family:'Source Serif 4',Cambria,Georgia,serif;text-align:center;color:#B57D0E;font-size:1.5rem}
+.ae-small{text-align:center;color:#5B6B7B;margin-top:4px}
+@media (max-width:640px){
+  .ae-logo-top{gap:8px;margin-bottom:10px}
+  .ae-logo-top img.mark{height:30px}
+  .ae-logo-top img.word{height:24px}
+  .ae-title{font-size:1.6rem}
+  .ae-subtitle{font-size:1.1rem}
+  .block-container{padding-left:.8rem !important;padding-right:.8rem !important;padding-top:2.2rem !important}
+}
+</style>""", unsafe_allow_html=True)
 
 
 @st.cache_resource
@@ -71,26 +91,33 @@ except Exception as e:
 GRAFANA_URL = get_setting("GRAFANA_URL")
 
 
+def projection_shares() -> dict:
+    """Shares saved in the app per month; any other month uses PROJECTION_SHARE."""
+    try:
+        return db.get_projection_shares()
+    except Exception:
+        return {}
+
+
 # =====================================================================
 # Login
 # =====================================================================
-def _logo_html(mark_h: int = 60, word_h: int = 48) -> str:
+def _logo_html() -> str:
     folder = Path(__file__).parent / "assets"
     imgs = [base64.b64encode((folder / f).read_bytes()).decode() for f in ("logo_mark.png", "logo_word.png")
             if (folder / f).exists()]
     if len(imgs) < 2:
         return ""
-    return (f'<div style="display:flex;justify-content:center;align-items:center;gap:14px;margin:10px 0 18px">'
-            f'<img src="data:image/png;base64,{imgs[0]}" height="{mark_h}">'
-            f'<img src="data:image/png;base64,{imgs[1]}" height="{word_h}"></div>')
+    return (f'<div class="ae-logo-top"><img class="mark" src="data:image/png;base64,{imgs[0]}">'
+            f'<img class="word" src="data:image/png;base64,{imgs[1]}"></div>')
 
 
 def login_page() -> None:
     _, mid, _ = st.columns([1, 1.2, 1])
     with mid:
-        st.markdown(_logo_html(), unsafe_allow_html=True)
-        st.title(PLANT_NAME)
-        st.caption(f"{PLANT_CAPACITY_KWP} kWp rooftop solar · generation and grid reports")
+        st.markdown(_logo_html() + f'<div class="ae-title">{escape(PLANT_NAME)}</div>'
+                    f'<div class="ae-small">{PLANT_CAPACITY_KWP} kWp rooftop solar · generation and grid reports</div>',
+                    unsafe_allow_html=True)
         with st.form("login"):
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
@@ -272,6 +299,22 @@ def import_page() -> None:
     bill_form()
     if not IS_ADMIN:
         return
+    with st.expander("Tools: projected view share per month"):
+        st.caption("In the Projected view, an inverter that is faulty on most days of a month gets this share of "
+                   "each day's actual total; every reading is scaled down so day totals stay the same. "
+                   f"Months without a saved share use {PROJECTION_SHARE:.0%}. To match a monthly report, enter "
+                   "the share that report used (September 2026: 10%, October 2026: 7%).")
+        shares = projection_shares()
+        all_months = db.available_months() or [pd.Timestamp.today().strftime("%Y-%m")]
+        s1, s2, s3 = st.columns([1, 1, 1])
+        sm = s1.selectbox("Month", all_months, key="share_month", format_func=_month_label)
+        val = s2.number_input("Share (%)", min_value=0.0, max_value=30.0, step=0.5,
+                              value=round(share_for(sm, shares) * 100, 2), key=f"share_val_{sm}")
+        s3.markdown("&nbsp;")
+        if s3.button("Save share", key="share_save"):
+            db.save_projection_share(sm, val / 100)
+            st.success(f"{_month_label(sm)}: share set to {val:g}%")
+
     with st.expander("Tools: delete a month's data"):
         st.caption(f"Database: {db.database_label()}. Use this to remove test data or a wrong import. "
                    "It cannot be undone.")
@@ -402,7 +445,8 @@ with st.sidebar:
     SEL = [p for p in INVERTER_IDS if p in shown_inverters] or INVERTER_IDS
     ALL_SEL = len(SEL) == len(INVERTER_IDS)
     RAW_INV = inv_all.copy()                       # actual readings, for the actual-vs-projected table
-    viewed = apply_view(inv_all, VIEW)
+    SHARES = projection_shares()
+    viewed = apply_view(inv_all, VIEW, SHARES)
     if not ALL_SEL:
         viewed["Total"] = viewed[SEL].sum(axis=1, min_count=1).round(2)
     inv_all = enrich(viewed, PLANT_CAPACITY_KWP * len(SEL) / len(INVERTER_IDS))
@@ -442,8 +486,8 @@ lt_p, ht_p, DAILY_ALL, NODATA_ALL, BILL_MONTHS = build_period(inv_all, lt_all, h
 
 base = inv_all
 if HEALTH != "All days":
-    _, faulty_cells = project(RAW_INV)
-    faulty_days = set(RAW_INV.loc[faulty_cells[SEL].any(axis=1).values, "date"])
+    bad = faulty_cells(RAW_INV)
+    faulty_days = set(RAW_INV.loc[bad[SEL].any(axis=1).values, "date"])
     keep = base["date"].isin(faulty_days)
     base = base[keep if HEALTH == "Days with a faulty reading" else ~keep]
 inv, lt, ht = apply_filters(base, lt_p, ht_p, P_START, P_END, weather, productivity, day_types)
@@ -510,12 +554,12 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;600;700&display=swap');
 .ae-serif{font-family:'Source Serif 4',Cambria,Georgia,serif}
-.ae-cover{background:#1C2B3A;border-radius:14px;padding:30px 38px 22px;color:#fff;margin-bottom:8px}
+.ae-cover{background:#1C2B3A;border-radius:14px;padding:30px 38px 22px;color:#fff;margin-bottom:8px;text-align:center}
 .ae-logo{display:inline-flex;align-items:center;gap:12px;background:#fff;padding:6px 14px;border-radius:4px}
 .ae-cover h1{font-family:'Source Serif 4',Cambria,Georgia,serif;font-weight:700;color:#fff;font-size:2.7rem;margin:0;padding:0}
 .ae-cover .sub{color:#E5A01A;font-family:'Source Serif 4',Cambria,Georgia,serif;font-size:1.7rem;margin-top:2px}
 .ae-cover .meta{color:#C9D2DC;margin-top:14px}
-.ae-hero{display:flex;gap:70px;flex-wrap:wrap;margin-top:30px}
+.ae-hero{display:flex;gap:70px;flex-wrap:wrap;margin-top:30px;justify-content:center}
 .ae-hero .v{font-family:'Source Serif 4',Cambria,Georgia,serif;font-size:2.6rem;color:#fff;line-height:1.1}
 .ae-hero .l{color:#DDE3EA;font-size:.95rem}.ae-hero .s{color:#8FA0B3;font-size:.95rem}
 .ae-cover .prep{color:#8FA0B3;font-size:.8rem;margin-top:26px}
@@ -552,7 +596,7 @@ table.ae-t{border-collapse:collapse;width:100%;font-size:.86rem}
 .ae-obs h2{font-family:'Source Serif 4',Cambria,Georgia,serif;color:#fff;font-size:2rem;margin:0 0 18px}
 .ae-oi{display:flex;gap:18px;margin:16px 0}.ae-oi b{font-size:1.1rem}.ae-oi div div{color:#C9D2DC;margin-top:4px}
 .ae-foot{display:flex;justify-content:space-between;align-items:center;color:#5B6B7B;font-size:.75rem;border-top:1px solid #E3E7ED;margin-top:36px;padding-top:10px}
-@media (max-width:900px){.ae-grid,.ae-bill{grid-template-columns:1fr}.ae-why{grid-row:auto}}
+@media (max-width:900px){.ae-grid{grid-template-columns:1fr 1fr}.ae-bill{grid-template-columns:1fr 1fr}.ae-why{grid-row:auto;grid-column:1/-1}.ae-hero{gap:36px}}@media (max-width:640px){.ae-grid{grid-template-columns:1fr 1fr;gap:8px}.ae-bill{grid-template-columns:1fr;gap:10px}.ae-grid .ae-card{padding:12px}.ae-grid .ae-card .v{font-size:1.3rem;margin-top:8px}.ae-grid .ae-card .l{font-size:.85rem}.ae-grid .ae-card .n{font-size:.72rem}.ae-cover{padding:20px 16px 16px}.ae-cover h1{font-size:1.7rem}.ae-cover .sub{font-size:1.1rem}.ae-cover .meta{font-size:.82rem}.ae-hero{gap:18px;margin-top:18px}.ae-hero .v{font-size:1.75rem}.ae-h2{font-size:1.4rem;margin:28px 0 4px}.ae-lead{font-size:.92rem}.ae-card{padding:14px 16px}.ae-card .v{font-size:1.7rem}.ae-ico{width:38px;height:38px;font-size:18px}.ae-ico svg{width:20px;height:20px}.ae-why{padding:16px 18px}table.ae-t{font-size:.76rem}.ae-t th,.ae-t td{padding:5px 6px}.ae-t td.wx{min-width:120px}.ae-scroll{max-height:420px}.ae-tiles{grid-template-columns:repeat(auto-fill,minmax(68px,1fr))}.ae-tile{font-size:.7rem}.ae-obs{padding:20px 18px}.ae-obs h2{font-size:1.4rem}.ae-foot{flex-direction:column;gap:6px;align-items:flex-start}}
 </style>""", unsafe_allow_html=True)
 
 
@@ -595,20 +639,14 @@ def src_notes() -> tuple[str, str]:
 # Sections
 # =====================================================================
 def page_logo() -> None:
-    if LOGO_MARK:
-        st.markdown(f'<div style="display:flex;justify-content:center;align-items:center;gap:14px;margin:0 0 18px">'
-                    f'<img src="data:image/png;base64,{LOGO_MARK}" height="54">'
-                    f'<img src="data:image/png;base64,{LOGO_WORD}" height="44"></div>', unsafe_allow_html=True)
+    st.markdown(_logo_html(), unsafe_allow_html=True)
 
 
 def customer_title() -> None:
     title = f"{MONTH_NAME} {P_START:%Y} generation and grid report" if month else \
         f"Generation and grid report, {_span(first, last)} {last:%Y}"
-    st.markdown(f'<div style="text-align:center"><div class="ae-serif" style="font-size:2.4rem;font-weight:700;'
-                f'color:#1C2B3A;line-height:1.15">{escape(PLANT_NAME)}</div>'
-                f'<div class="ae-serif" style="font-size:1.5rem;color:#B57D0E">{escape(title)}</div>'
-                f'<div style="color:#5B6B7B;margin-top:4px">{PLANT_CAPACITY_KWP} kWp rooftop solar</div></div>',
-                unsafe_allow_html=True)
+    st.markdown(f'<div class="ae-title">{escape(PLANT_NAME)}</div><div class="ae-subtitle">{escape(title)}</div>'
+                f'<div class="ae-small">{PLANT_CAPACITY_KWP} kWp rooftop solar</div>', unsafe_allow_html=True)
 
 
 def cover() -> None:
@@ -802,7 +840,8 @@ def inverter_readings() -> None:
     if NODATA and not IS_CUSTOMER:
         key += "  ·  " + ", ".join(f"{d:%d %b}" for d in NODATA) + ": no data"
     if IS_PROJ and not IS_CUSTOMER and any(inv[f"proj_{p}"].any() for p in cols if f"proj_{p}" in inv):
-        key += "  ·  p = projected (faulty or blank reading replaced by the group average)"
+        key += (f"  ·  p = includes {share_for(month, SHARES):.0%} of the day's total (day totals unchanged)" if month
+                else "  ·  p = includes a share of the day's total (day totals unchanged)")
     st.markdown(f'<div class="ae-key">{escape(key)}</div>', unsafe_allow_html=True)
 
 
@@ -970,26 +1009,30 @@ def actual_vs_projected() -> None:
     raw = RAW_INV[RAW_INV["date"].isin(inv["date"])].reset_index(drop=True)
     if raw.empty:
         return
-    proj, replaced = project(raw)
+    proj, replaced = project(raw, SHARES)
     a, pj = raw[SEL].sum(), proj[SEL].sum()
     n = replaced[SEL].sum()
     tbl = pd.DataFrame({"Inverter": SEL, "Location": [INVERTERS[p] for p in SEL],
                         "Actual kWh": a.values, "Projected kWh": pj.values,
                         "Difference kWh": (pj - a).values, "Readings projected": n.values})
     tbl.loc[len(tbl)] = ["Total", "", a.sum(), pj.sum(), pj.sum() - a.sum(), int(n.sum())]
-    h2("Actual vs projected", f"Backend projection: {int(n.sum())} faulty or blank reading(s) replaced by the "
-       f"average of the healthy inverters in the same group. Customers see the projected data.")
+    chronic = {m: [p for p in ps if p in SEL] for m, ps in chronic_inverters(raw).items()}
+    parts = [f"{pd.Timestamp(m + '-01'):%B}: {', '.join(ps)} faulty on most days, so each day "
+             f"{'it gets' if len(ps) == 1 else 'each gets'} {share_for(m, SHARES):.0%} of the day's actual total and "
+             f"every reading is scaled to {1 - share_for(m, SHARES) * len(ps):.0%}." for m, ps in chronic.items() if ps]
+    how = (" ".join(parts) + " ") if parts else "No inverter is faulty on most days, so projected equals actual. "
+    h2("Actual vs projected", how + "Day and month totals are unchanged. Customers see the projected split.")
     rows = "".join(
         f'<tr class="{"total" if r["Inverter"] == "Total" else ""}"><td class="b">{r["Inverter"]}</td>'
         f'<td>{escape(r["Location"])}</td><td>{r["Actual kWh"]:,.2f}</td><td>{r["Projected kWh"]:,.2f}</td>'
         f'<td>{r["Difference kWh"]:+,.2f}</td><td>{int(r["Readings projected"])}</td></tr>'
         for _, r in tbl.iterrows())
     st.markdown('<div class="ae-tw"><table class="ae-t"><tr><th>Inverter</th><th>Location</th><th>Actual kWh</th>'
-                '<th>Projected kWh</th><th>Difference</th><th>Readings projected</th></tr>' + rows + "</table></div>",
+                '<th>Projected kWh</th><th>Difference</th><th>Days with share</th></tr>' + rows + "</table></div>",
                 unsafe_allow_html=True)
     changed = [(d, p, raw.at[i, p], proj.at[i, p]) for i, d in enumerate(raw["date"]) for p in SEL
                if replaced.at[i, p]]
-    with st.expander(f"Every projected reading ({len(changed)})"):
+    with st.expander(f"Every day with a share ({len(changed)})"):
         st.dataframe(pd.DataFrame([{"Date": f"{d:%d %b %Y}", "Inverter": p,
                                     "Actual kWh": None if pd.isna(x) else round(x, 2), "Projected kWh": round(y, 2)}
                                    for d, p, x, y in changed]), hide_index=True, use_container_width=True)
