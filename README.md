@@ -82,8 +82,7 @@ with a note; anything less clear is refused.
 Logo and title, the month "at a glance", then four tabs: Inverter view, LT meter view (date-wise
 with weather), HT meter view (import/export) and Consolidated view.
 
-- **Filters**: customers have only the period filter (Month, Date range or Single day) in the sidebar.
-  It applies to the whole page.
+- **Filters**: customers have only the Month filter in the sidebar (no date range or single day). It applies to the whole page.
 - **Inverter view** has its own inverter picker. It changes only the inverter-wise table (the Total
   column then becomes "Total (shown)"); cards, charts and the other tabs always cover all inverters.
 - **Consolidated view**: PV system comparison (daily energy stacked by PV system, with kWh/kWp and kWh
@@ -130,7 +129,7 @@ automatic headline and a "Why the demand peaked" note built from that day's sola
 
 ## Filters (sidebar)
 
-Staff (O&M Manager / Executive) see all of these. Every filter updates the whole page — cards, charts, the inverter table and the statement. (Customers see only the Period filter, see Customer portal.)
+Staff (O&M Manager / Executive) see all of these. Every filter updates the whole page — cards, charts, the inverter table and the statement. (Customers see only the Month filter, see Customer portal.)
 
 - **Period**: Month, Date range or Single day. Whole months are loaded behind the scenes so
   bill-based daily figures are spread correctly, then cut to the chosen dates.

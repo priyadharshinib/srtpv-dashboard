@@ -3,7 +3,7 @@
 PLANT_NAME = "SRTPV DASHBOARD"
 PLANT_FULL_NAME = "SRTPV RRMCH Plant One"
 PLANT_SHORT = "SRTPV plant"
-PLANT_SITE = "RRMCH Plant"     # shown under the title on the login page
+PLANT_SITE = "RRMCH Plant One"   # shown under the title on the login page
 BRAND = "asase.energy"
 CONFIDENTIAL = "CONFIDENTIAL — FOR INTERNAL USE ONLY"
 PLANT_CAPACITY_KWP = 984.5

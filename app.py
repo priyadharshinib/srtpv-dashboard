@@ -413,7 +413,9 @@ with st.sidebar:
     st.header("Filters")
 
     # ---- period: month, date range or a single day
-    mode = st.radio("Period", ["Month", "Date range", "Single day"], horizontal=True, key="f_mode")
+    # customers pick a month only; staff can also use a date range or a single day
+    mode = "Month" if IS_CUSTOMER else st.radio("Period", ["Month", "Date range", "Single day"],
+                                                horizontal=True, key="f_mode")
     if mode == "Month":
         months = db.available_months()
         month = st.selectbox("Month", months, format_func=lambda m: pd.Timestamp(m + "-01").strftime("%B %Y"),
