@@ -3,6 +3,7 @@
 PLANT_NAME = "SRTPV DASHBOARD"
 PLANT_FULL_NAME = "SRTPV RRMCH Plant One"
 PLANT_SHORT = "SRTPV plant"
+PLANT_SITE = "RRMCH Plant"     # shown under the title on the login page
 BRAND = "asase.energy"
 CONFIDENTIAL = "CONFIDENTIAL — FOR INTERNAL USE ONLY"
 PLANT_CAPACITY_KWP = 984.5
@@ -20,6 +21,15 @@ INVERTERS: dict[str, str] = {
     "PV9": "Hospital Annex Roof 3",
 }
 INVERTER_IDS = list(INVERTERS)
+
+# PV system comparison (consolidated view). Names follow the inverter portal's "PV system" list.
+PV_SYSTEM_NAMES: dict[str, str] = {
+    p: (loc if loc.startswith("RR") else f"RR {loc}") + f" {p}" for p, loc in INVERTERS.items()
+}
+# kWp used for kWh/kWp in that comparison. 100 kWp each is what the portal screenshot implies
+# (kWh / kWh-per-kWp = 100.0 for all nine). Replace with each inverter's real DC capacity if different;
+# note nine x 100 = 900, while PLANT_CAPACITY_KWP above is 984.5.
+INVERTER_KWP: dict[str, float] = {p: 100.0 for p in INVERTER_IDS}
 
 # Meter multiplying factors (site kWh = meter display units x MF)
 LT_METER_MF = 300      # Landis+Gyr E650, Sl. P0028544

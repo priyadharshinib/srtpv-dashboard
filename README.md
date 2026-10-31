@@ -82,6 +82,18 @@ with a note; anything less clear is refused.
 Logo and title, the month "at a glance", then four tabs: Inverter view, LT meter view (date-wise
 with weather), HT meter view (import/export) and Consolidated view.
 
+- **Filters**: customers have only the period filter (Month, Date range or Single day) in the sidebar.
+  It applies to the whole page.
+- **Inverter view** has its own inverter picker. It changes only the inverter-wise table (the Total
+  column then becomes "Total (shown)"); cards, charts and the other tabs always cover all inverters.
+- **Consolidated view**: PV system comparison (daily energy stacked by PV system, with kWh/kWp and kWh
+  per system, like the inverter portal), inverter vs LT meter bar chart, then the consolidated daily
+  statement. Days without an LT meter reading are listed under the chart.
+- Customers have no Excel download. Staff keep "Download this report's data (Excel)".
+- The login page shows the plant name (`PLANT_SITE` in `core/config.py`) under the title.
+- kWh/kWp in the PV system comparison uses `INVERTER_KWP` in `core/config.py` (100 kWp per inverter, as the
+  portal shows; set each inverter's real DC capacity there if it differs).
+
 ## Report-style dashboard
 
 The dashboard follows the asase.energy monthly report, section by section: cover,
@@ -118,7 +130,7 @@ automatic headline and a "Why the demand peaked" note built from that day's sola
 
 ## Filters (sidebar)
 
-Every filter updates the whole page — cards, charts, the inverter table and the statement:
+Staff (O&M Manager / Executive) see all of these. Every filter updates the whole page — cards, charts, the inverter table and the statement. (Customers see only the Period filter, see Customer portal.)
 
 - **Period**: Month, Date range or Single day. Whole months are loaded behind the scenes so
   bill-based daily figures are spread correctly, then cut to the chosen dates.

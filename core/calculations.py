@@ -70,6 +70,21 @@ def inverter_totals(inv: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def pv_comparison(inv: pd.DataFrame) -> pd.DataFrame:
+    """Per PV system over the days in `inv`: kWh and kWh per kWp (as in the inverter portal's
+    'PV system comparison'). One row per inverter, in PV1..PV9 order."""
+    from core.config import INVERTER_KWP, PV_SYSTEM_NAMES
+
+    out = pd.DataFrame({
+        "inverter": INVERTER_IDS,
+        "name": [PV_SYSTEM_NAMES[p] for p in INVERTER_IDS],
+        "kwp": [INVERTER_KWP[p] for p in INVERTER_IDS],
+        "kwh": inv[INVERTER_IDS].sum().values,
+    })
+    out["kwh_per_kwp"] = out["kwh"] / out["kwp"]
+    return out
+
+
 def outage_mask(inv: pd.DataFrame) -> pd.Series:
     """True for days whose total is below OUTAGE_FRACTION of the month median.
     If the frame already carries an is_outage column (see filters.enrich), use it."""

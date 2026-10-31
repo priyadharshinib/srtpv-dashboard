@@ -40,6 +40,27 @@ def _days(dates) -> str:
     return ds[0] if len(ds) == 1 else ", ".join(ds[:-1]) + " and " + ds[-1]
 
 
+def day_ranges(dates) -> str:
+    """Consecutive days joined up: [14..30 Oct] -> '14–30 Oct'; [3, 7, 8] -> '03 Oct, 07–08 Oct'."""
+    ds = sorted(pd.to_datetime(list(dates)))
+    runs: list[list[pd.Timestamp]] = []
+    for d in ds:
+        if runs and (d - runs[-1][-1]).days == 1:
+            runs[-1].append(d)
+        else:
+            runs.append([d])
+    out = []
+    for r in runs:
+        a, b = r[0], r[-1]
+        if a == b:
+            out.append(f"{a:%d %b}")
+        elif (a.year, a.month) == (b.year, b.month):
+            out.append(f"{a:%d}–{b:%d %b}")
+        else:
+            out.append(f"{a:%d %b} – {b:%d %b}")
+    return ", ".join(out)
+
+
 def daily_headline(inv: pd.DataFrame, nodata: list) -> str:
     if inv.empty:
         return ""

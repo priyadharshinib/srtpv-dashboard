@@ -467,3 +467,35 @@ def test_projection_share_is_per_month():
     assert (out.loc[0, "PV1"], out.loc[0, "PV4"]) == (348.93, 225.65)
     out2, _ = project(inv)                                           # no saved share -> default 10%
     assert out2.loc[0, "PV1"] == round(375.19 * 0.9, 2)
+
+
+# ---------- consolidated view: PV system comparison, LT gaps ----------
+
+def test_pv_comparison_matches_the_portal_screenshot():
+    # Inverter portal, October 2026: PV2 13,210.65 kWh at 132.11 kWh/kWp (100 kWp)
+    from core.calculations import pv_comparison
+    from core.config import INVERTER_IDS
+
+    inv = pd.DataFrame({"date": pd.date_range("2026-10-01", periods=2), **{p: [0.0, 0.0] for p in INVERTER_IDS}})
+    inv["PV2"] = [13000.0, 210.65]
+    t = pv_comparison(inv).set_index("inverter")
+    assert list(t.index) == INVERTER_IDS
+    assert t.loc["PV2", "kwh"] == pytest.approx(13210.65)
+    assert t.loc["PV2", "kwh_per_kwp"] == pytest.approx(132.11, abs=0.005)
+    assert t.loc["PV7", "name"] == "RR Hospital Roof 2 PV7"
+    assert t.loc["PV9", "name"] == "RR Hospital Annex Roof 3 PV9"
+
+
+def test_pv_comparison_adds_up_to_the_inverter_total(sample):
+    from core.calculations import pv_comparison
+
+    inv = sample[0]
+    assert pv_comparison(inv)["kwh"].sum() == pytest.approx(inv["Total"].sum(), abs=0.1)
+
+
+def test_day_ranges():
+    from core.report import day_ranges
+
+    assert day_ranges(pd.date_range("2026-10-14", "2026-10-30")) == "14–30 Oct"
+    assert day_ranges(pd.to_datetime(["2026-10-03", "2026-10-07", "2026-10-08"])) == "03 Oct, 07–08 Oct"
+    assert day_ranges(pd.to_datetime(["2026-10-31", "2026-11-01"])) == "31 Oct – 01 Nov"

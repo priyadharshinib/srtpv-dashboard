@@ -225,3 +225,50 @@ def lt_daily_chart(daily: pd.DataFrame) -> go.Figure:
                            customdata=daily[["weather"]].fillna(""),
                            hovertemplate="%{y:,.0f} kWh · %{customdata[0]}<extra></extra>"))
     return _r_layout(fig, 340)
+
+
+# ---------------------------------------------------------------------
+# Consolidated view charts
+# ---------------------------------------------------------------------
+# Colours and stacking order follow the inverter portal's "PV system comparison"
+# (bottom to top: PV7, PV8, PV9, PV6, PV5, PV4, PV3, PV1, PV2).
+PV_COLOURS = {
+    "PV1": "#6DBF4B", "PV2": "#6BAED0", "PV3": "#3F4A9E",
+    "PV4": "#0FA58D", "PV5": "#00695F", "PV6": "#9C59A8",
+    "PV7": "#F6C000", "PV8": "#E2431E", "PV9": "#B5174F",
+}
+PV_STACK_ORDER = ["PV7", "PV8", "PV9", "PV6", "PV5", "PV4", "PV3", "PV1", "PV2"]
+
+
+def pv_comparison_chart(inv: pd.DataFrame) -> go.Figure:
+    """Daily energy stacked by PV system. Days without a row show as empty slots."""
+    from core.config import PV_SYSTEM_NAMES
+
+    full = pd.date_range(inv["date"].min(), inv["date"].max())
+    d = inv.set_index("date").reindex(full)
+    multi_month = d.index.to_period("M").nunique() > 1
+    x = d.index.strftime("%d %b" if multi_month else "%d")
+    fig = go.Figure()
+    for p in PV_STACK_ORDER:
+        fig.add_bar(x=x, y=d[p], name=PV_SYSTEM_NAMES[p], marker_color=PV_COLOURS[p],
+                    hovertemplate="%{y:,.0f} kWh<extra>" + PV_SYSTEM_NAMES[p] + "</extra>")
+    fig.update_layout(barmode="stack")
+    fig = _r_layout(fig, 460)
+    fig.update_layout(showlegend=False, bargap=0.18)
+    fig.update_yaxes(title_text="Energy [kWh]")
+    return fig
+
+
+def inverter_vs_lt_bar_chart(daily: pd.DataFrame, lt_estimated: bool, inverter_label: str = "Inverter") -> go.Figure:
+    """Side-by-side daily bars: inverter total and LT meter."""
+    x = daily["date"].dt.strftime("%d")
+    fig = go.Figure()
+    fig.add_bar(x=x, y=daily["inverter_kwh"], name=f"{inverter_label} (kWh)", marker_color=R_AMBER,
+                hovertemplate="%{y:,.0f} kWh<extra>" + inverter_label + "</extra>")
+    fig.add_bar(x=x, y=daily["lt_kwh"], name="LT meter, daily estimate (kWh)" if lt_estimated else "LT meter (kWh)",
+                marker_color=R_TEAL, hovertemplate="%{y:,.0f} kWh<extra>LT meter</extra>")
+    fig.update_layout(barmode="group")
+    fig = _r_layout(fig, 400)
+    fig.update_layout(bargap=0.25, bargroupgap=0.05)
+    fig.update_yaxes(title_text="Energy [kWh]")
+    return fig
