@@ -597,6 +597,7 @@ table.ae-t{border-collapse:collapse;width:100%;font-size:.86rem}
 .ae-t td.i{font-style:italic}.ae-t td.b{font-weight:700}.ae-t td.tot{background:#ECEFF4;font-weight:700}
 .ae-t tr.low td{color:#C0392B}.ae-t tr.lowbg td{background:#FBE6E3}
 .ae-t td.flag{background:#F9E1DE !important;color:#C0392B !important;font-weight:700}
+.ae-inv tr.low td{color:#7B8794}.ae-inv td.flag{background:#E9ECEF !important;color:#5B6B7B !important;font-weight:700}
 .ae-t td.proj{color:#2A6FB0 !important}.ae-t td.proj::after{content:" p";font-size:.7em;vertical-align:super}
 .ae-t tr.total td{background:#E3E7ED;font-weight:700}
 .ae-t td.wx{text-align:left;white-space:normal;min-width:180px}.ae-t th.wx{text-align:left}
@@ -866,7 +867,7 @@ def _inv_table_html(cols: list[str]) -> str:
     sums = src[[*cols, "Total"]].sum()
     body.append(f'<tr class="total"><td colspan="2">Total {_short(first, last)}</td>'
                 + "".join(f'<td class="i">{sums[c]:,.2f}</td>' for c in cols) + f'<td>{sums["Total"]:,.2f}</td></tr>')
-    return f'<div class="ae-scroll"><table class="ae-t"><tr>{head}</tr>{"".join(body)}</table></div>'
+    return f'<div class="ae-scroll"><table class="ae-t ae-inv"><tr>{head}</tr>{"".join(body)}</table></div>'
 
 
 def _roof_key() -> str:
@@ -897,6 +898,18 @@ def inverter_readings(with_filter: bool = False) -> None:
         key += (f"  ·  p = includes {share_for(month, SHARES):.0%} of the day's total (day totals unchanged)" if month
                 else "  ·  p = includes a share of the day's total (day totals unchanged)")
     st.markdown(f'<div class="ae-key">{escape(key)}</div>', unsafe_allow_html=True)
+    if month:                                   # note for the month: written by admins, read by everyone
+        inv_note = db.load_inverter_note(month)
+        if inv_note:
+            st.markdown('<div class="ae-card" style="margin-top:10px"><h4>Note</h4><div class="n">'
+                        + escape(inv_note).replace("\n", "<br>") + "</div></div>", unsafe_allow_html=True)
+        if IS_ADMIN:
+            new_note = st.text_area("Note under the inverter table (admin only, visible to everyone)",
+                                    value=inv_note, height=90, key=f"inv_note_{month}")
+            if st.button("Save inverter note", key=f"inv_note_save_{month}"):
+                db.save_inverter_note(month, new_note.strip())
+                st.success("Note saved")
+                st.rerun()
 
 
 def month_total() -> None:

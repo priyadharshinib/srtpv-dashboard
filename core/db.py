@@ -108,6 +108,13 @@ class MonthlyBill(Base):
     inverter_note_body: Mapped[str] = mapped_column(Text, default="")
 
 
+class InverterNote(Base):
+    """Note shown under the inverter-wise table for a month. Written by admins only."""
+    __tablename__ = "inverter_notes"
+    month: Mapped[str] = mapped_column(String(7), primary_key=True)
+    text: Mapped[str] = mapped_column(Text, default="")
+
+
 class MonthNote(Base):
     """Free-text engineering notes per month, e.g. '2026-10'."""
     __tablename__ = "month_notes"
@@ -302,6 +309,17 @@ def load_range(start: dt.date, end: dt.date) -> tuple[pd.DataFrame, pd.DataFrame
     } for r in ht_rows], columns=["date", "day", "import_kwh", "export_kwh", "net_import_kwh", "power_factor", "note"])
 
     return inv.reset_index(drop=True), lt, ht
+
+
+def save_inverter_note(month: str, text: str) -> None:
+    with Session(engine) as s, s.begin():
+        s.merge(InverterNote(month=month, text=text))
+
+
+def load_inverter_note(month: str) -> str:
+    with Session(engine) as s:
+        note = s.get(InverterNote, month)
+    return note.text if note else ""
 
 
 def load_note(month: str) -> str:
