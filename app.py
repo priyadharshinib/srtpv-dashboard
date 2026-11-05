@@ -45,11 +45,11 @@ from core.config import (
 from core.filters import apply_filters, enrich, productivity_summary
 from core.importer import import_ht_meter, import_inverter, import_lt_meter
 from core.observations import glance_headline, inverter_issues
-from core.report import build_period, daily_headline, day_ranges, followups, month_list, short_weather, very_low_mask
+from core.report import build_period, daily_headline, day_ranges, fill_bill_lt, followups, month_list, short_weather, very_low_mask
 from core.settings import get_setting
 from core.views import PROJECTED, apply_view, views_for
 from core.projection import chronic_inverters, faulty_cells, project, share_for
-from core.billing import BILL_LT_DISCLAIMER, demand_headline, demand_pct, demand_story, ht_export_breakdown, ht_import_breakdown, inr
+from core.billing import BILL_LT_DISCLAIMER, demand_headline, demand_pct, demand_story, ht_import_breakdown, inr
 from core.batches import ADD_NEW, ALL_MONTHS, REPLACE, REPLACE_MONTH, coverage_text, prepare_batch, split_by_month
 from core.config import CONTRACT_DEMAND_KVA, DEFAULT_EXPORT_NOTE, PROJECTION_SHARE
 
@@ -210,6 +210,9 @@ def bill_form() -> None:
         if st.form_submit_button("Save bill", type="primary"):
             if not (ht_imp or lt_units or net or md):
                 st.error("Enter at least the energy totals (or the net payable / maximum demand).")
+            elif ht_exp > ht_imp:
+                st.error(f"HT export ({ht_exp:,.0f}) is larger than HT import ({ht_imp:,.0f}). "
+                         "Please check the two are not swapped.")
             elif bill_lt and bill_lt >= ht_imp:
                 st.error("Bill LT must be less than the total HT import.")
             else:
@@ -511,7 +514,7 @@ with st.sidebar:
 # =====================================================================
 # Period data: bill estimates where a bill has totals, meter readings otherwise
 # =====================================================================
-BILLS = {m: db.load_bill(m) for m in month_list(L_START, L_END)}
+BILLS = fill_bill_lt({m: db.load_bill(m) for m in month_list(L_START, L_END)}, lt_all)
 lt_p, ht_p, DAILY_ALL, NODATA_ALL, BILL_MONTHS = build_period(inv_all, lt_all, ht_all, BILLS, L_START, L_END)
 
 base = inv_all
@@ -714,18 +717,20 @@ def cover() -> None:
 
 def at_a_glance(customer: bool = False) -> None:
     lt_note, ht_note = src_notes()
+    imp_calc = ht_import_breakdown(BILLS, month_list(P_START, P_END))
+    imp_note = ht_note + (f" · {imp_calc['gross']:,.1f} − {imp_calc['bill_lt']:,.1f} (20 KW LT + 16 KW LT) = {imp_calc['net']:,.1f}"
+                          if (imp_calc["populated"] and not filtered) else f" · {BILL_LT_DISCLAIMER}")
     h2(f"{MONTH_NAME} at a glance" if month else f"At a glance, {_span(first, last)}",
        glance_headline(KPIS, inv, "month" if month else "period", include_outages=not customer, only=SEL))
     cards_html = [
         card("panel", "amber", f"{KPIS['inverter_kwh']:,.0f}", "Inverter generation", (f"kWh · {_short(first, last)}{SEL_NOTE}" if IS_CUSTOMER else f"kWh · {DATA_WORD} · {_short(first, last)}{SEL_NOTE}")),
         card("gauge", "teal", f"{KPIS['lt_kwh']:,.0f}", "LT meter generation", lt_note),
-        card("down", "navy", f"{KPIS['ht_import_kwh']:,.0f}", "HT grid import", ht_note),
-        card("up", "coral", f"{KPIS['ht_export_kwh']:,.0f}", "HT grid export",
-             ht_note + ((" · " + BILL["export_note"]) if (BILL or {}).get("export_note") else "")),
+        card("down", "navy", f"{KPIS['ht_import_kwh']:,.0f}", "HT grid import", imp_note),
+        card("up", "coral", f"{KPIS['ht_export_kwh']:,.0f}", "HT grid export", ht_note),
         card("factory", "slate", f"{KPIS['site_load_kwh']:,.0f}", "Site consumption", "kWh · HT net import + LT solar"),
         card("pie", "amber", f"{KPIS['solar_share']:.0%}", "Solar share of load", "LT solar ÷ site consumption"),
     ]
-    st.markdown('<div class="ae-grid">' + "".join(cards_html) + ht_calc_cards() + "</div>", unsafe_allow_html=True)
+    st.markdown('<div class="ae-grid">' + "".join(cards_html) + "</div>", unsafe_allow_html=True)
 
 
 def bill_slide() -> None:
@@ -761,7 +766,7 @@ def bill_slide() -> None:
     else:
         pf_card = card("pf", "coral", f"{pf:.3f}", "Average power factor", f"At or above {PF_LIMIT:.2f} · no penalty")
     exp = BILL.get("ht_export_kwh") if BILL.get("ht_export_kwh") is not None else KPIS["ht_export_kwh"]
-    exp_card = card("up", "teal", f"{exp:,.0f} kWh", "Grid export", BILL.get("export_note") or "")
+    exp_card = card("up", "teal", f"{exp:,.0f} kWh", "Grid export", "")
     story = demand_story(BILL, inv_all, MONTH_NAME) if has_md else None
     why = ""
     if story:
@@ -967,8 +972,7 @@ def grid_exchange() -> None:
     side = [f'<div class="ae-card"><h4>{ico("down", "navy")}<span class="ae-serif" style="font-size:1.9rem;font-weight:400">'
             f'{KPIS["ht_import_kwh"]:,.0f}</span></h4><div class="n">kWh imported ({tag})</div></div>',
             f'<div class="ae-card"><h4>{ico("up", "coral")}<span class="ae-serif" style="font-size:1.9rem;font-weight:400">'
-            f'{KPIS["ht_export_kwh"]:,.0f}</span></h4><div class="n">kWh exported ({tag})</div>'
-            + (f'<div class="n">{escape(BILL["export_note"])}</div>' if (BILL or {}).get("export_note") else "") + '</div>',
+            f'{KPIS["ht_export_kwh"]:,.0f}</span></h4><div class="n">kWh exported ({tag})</div></div>',
             f'<div class="ae-card"><h4>{ico("bolt", "slate")}<span class="ae-serif" style="font-size:1.9rem;font-weight:400">'
             f'{KPIS["ht_net_kwh"]:,.0f}</span></h4><div class="n">kWh net import</div></div>']
     note = (BILL or {}).get("meter_note") or ""
@@ -978,12 +982,10 @@ def grid_exchange() -> None:
 
 
 def ht_import_calc() -> None:
-    """Under the Consolidated and HT tables: Total HT import - Bill LT = HT import, and
-    HT export - LT meter reading, with the month's export note.
-    If the month's Bill LT is not entered, only the small disclaimer is shown (plus the export note)."""
+    """Under the Consolidated and HT tables: Total HT import - Bill LT = HT import.
+    If the month's Bill LT is not entered, only the small disclaimer is shown."""
     months = month_list(P_START, P_END)
     b = ht_import_breakdown(BILLS, months)
-    e = ht_export_breakdown(BILLS, months)
     if not b["populated"]:
         st.markdown(f'<div class="ae-ltnote">HT import {escape(BILL_LT_DISCLAIMER)}</div>', unsafe_allow_html=True)
     elif not filtered:                  # with weather/health filters on, the table covers only some days
@@ -994,32 +996,6 @@ def ht_import_calc() -> None:
             f'<td>− {b["bill_lt"]:,.1f}</td></tr>'
             f'<tr class="net"><td>HT import</td><td>{b["net"]:,.1f}</td></tr>'
             "</table></div>", unsafe_allow_html=True)
-        if e["populated"]:
-            st.markdown(
-                '<div class="ae-calc"><table>'
-                f'<tr><td>HT export (as per bill)</td><td>{e["export"]:,.1f}</td></tr>'
-                '<tr><td>Less: LT meter reading <span class="sm">(20 KW LT + 16 KW LT)</span></td>'
-                f'<td>− {e["bill_lt"]:,.1f}</td></tr>'
-                f'<tr class="net"><td>HT export − LT meter reading</td><td>{e["net"]:,.1f}</td></tr>'
-                "</table></div>", unsafe_allow_html=True)
-    export_note = (BILL or {}).get("export_note") or ""
-    if export_note and not filtered:
-        st.markdown(f'<div class="ae-ltnote">HT export note: {escape(export_note)}</div>', unsafe_allow_html=True)
-
-
-def ht_calc_cards() -> str:
-    """Three extra dashboard cards (only when the month's LT meter reading is entered)."""
-    months = month_list(P_START, P_END)
-    b = ht_import_breakdown(BILLS, months)
-    e = ht_export_breakdown(BILLS, months)
-    if not (b["populated"] and e["populated"]) or filtered:
-        return ""
-    return "".join([
-        card("down", "navy", f"{b['gross']:,.0f}", "Total HT import (bill)", "kWh · before LT meter deduction"),
-        card("gauge", "amber", f"{b['bill_lt']:,.1f}", "LT meter reading", "kWh · 20 KW LT + 16 KW LT meters"),
-        card("up", "coral", f"{e['net']:,.1f}", "HT export − LT meter reading",
-             f"kWh · {e['export']:,.0f} export − {e['bill_lt']:,.1f} LT"),
-    ])
 
 
 def consolidated_inverter_note() -> None:

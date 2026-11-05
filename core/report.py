@@ -83,6 +83,21 @@ def month_list(start: pd.Timestamp, end: pd.Timestamp) -> list[str]:
     return [p.strftime("%Y-%m") for p in pd.period_range(start, end, freq="M")]
 
 
+def fill_bill_lt(bills: dict, lt: pd.DataFrame) -> dict:
+    """A bill saved without the SRTPV (LT) meter units has no LT total, so the dashboard would ignore its
+    HT import / export. Use the month's imported LT meter readings as that total instead (bills are not modified)."""
+    out = {}
+    for m, b in bills.items():
+        if b and b.get("lt_kwh") is None and b.get("ht_import_kwh") is not None and b.get("ht_export_kwh") is not None:
+            m_start = pd.Timestamp(m + "-01")
+            m_end = m_start + pd.offsets.MonthEnd(0)
+            lt_m = lt[(lt["from_date"] >= m_start) & (lt["from_date"] <= m_end)] if len(lt) else lt
+            if len(lt_m):
+                b = {**b, "lt_kwh": float(lt_m["kwh"].sum())}
+        out[m] = b
+    return out
+
+
 def build_period(inv: pd.DataFrame, lt: pd.DataFrame, ht: pd.DataFrame, bills: dict[str, dict | None],
                  start: pd.Timestamp, end: pd.Timestamp):
     """Combine imported data and bill totals for a period.

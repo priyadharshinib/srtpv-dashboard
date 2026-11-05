@@ -543,10 +543,11 @@ def test_ht_import_breakdown():
     assert BILL_LT_DISCLAIMER == "(1200 KVA HT + 20 KW LT + 16 KW LT)"
 
 
-def test_ht_export_breakdown():
-    from core.billing import ht_export_breakdown
-    full = {"lt_kwh": 1.0, "ht_import_kwh": 280602.0, "ht_export_kwh": 4056.0, "bill_lt_kwh": 3212.3}
-    b = ht_export_breakdown({"2026-10": full}, ["2026-10"])
-    assert b["populated"] and b["export"] == 4056.0 and round(b["net"], 1) == 843.7   # 4056 - 3212.3
-    assert not ht_export_breakdown({"2026-10": {**full, "bill_lt_kwh": None}}, ["2026-10"])["populated"]
-    assert not ht_export_breakdown({}, ["2026-10"])["populated"]
+def test_bill_without_lt_units_uses_imported_lt_meter_total():
+    from core.billing import ht_import_breakdown
+    from core.report import fill_bill_lt
+    lt = pd.DataFrame({"from_date": pd.to_datetime(["2026-10-01", "2026-10-02"]), "kwh": [1000.0, 500.0]})
+    bill = {"lt_kwh": None, "ht_import_kwh": 280602.0, "ht_export_kwh": 4056.0, "bill_lt_kwh": 3212.3}
+    out = fill_bill_lt({"2026-10": bill, "2026-09": None}, lt)
+    assert out["2026-10"]["lt_kwh"] == 1500.0 and bill["lt_kwh"] is None and out["2026-09"] is None
+    assert round(ht_import_breakdown(out, ["2026-10"])["net"], 1) == 277389.7
