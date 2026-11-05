@@ -456,6 +456,17 @@ with st.sidebar:
     RAW_INV = inv_all.copy()                       # actual readings, for the actual-vs-projected table
     SHARES = projection_shares()
     viewed = apply_view(inv_all, VIEW, SHARES)
+    
+
+    # TEMPORARY BYPASS: Show actual inverter readings on 03-Nov-2026
+    if VIEW != "Actual":
+        nov_3_mask = (
+            pd.to_datetime(RAW_INV["date"]).dt.date
+            == pd.Timestamp("2026-11-03").date()
+        )
+
+        for p in INVERTER_IDS:
+         viewed.loc[nov_3_mask, p] = RAW_INV.loc[nov_3_mask, p]
     if not ALL_SEL:
         viewed["Total"] = viewed[SEL].sum(axis=1, min_count=1).round(2)
     inv_all = enrich(viewed, PLANT_CAPACITY_KWP * len(SEL) / len(INVERTER_IDS))
