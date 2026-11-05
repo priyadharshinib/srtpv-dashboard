@@ -717,9 +717,7 @@ def cover() -> None:
 
 def at_a_glance(customer: bool = False) -> None:
     lt_note, ht_note = src_notes()
-    imp_calc = ht_import_breakdown(BILLS, month_list(P_START, P_END))
-    imp_note = ht_note + (f" · {imp_calc['gross']:,.1f} − {imp_calc['bill_lt']:,.1f} (20 KW LT + 16 KW LT) = {imp_calc['net']:,.1f}"
-                          if (imp_calc["populated"] and not filtered) else f" · {BILL_LT_DISCLAIMER}")
+    imp_note = f"kWh · HT meter · {BILL_LT_DISCLAIMER}"
     h2(f"{MONTH_NAME} at a glance" if month else f"At a glance, {_span(first, last)}",
        glance_headline(KPIS, inv, "month" if month else "period", include_outages=not customer, only=SEL))
     cards_html = [
@@ -862,6 +860,35 @@ def _month_rows(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return out
 
 
+def _with_total(df: pd.DataFrame, label_col: str, sum_cols: list[str], label: str = "Total") -> pd.DataFrame:
+    """Table for Excel: the rows as shown plus a closing total row."""
+    tot = {c: "" for c in df.columns}
+    tot[label_col] = label
+    for c in sum_cols:
+        tot[c] = df[c].sum(min_count=1)
+    return pd.concat([df, pd.DataFrame([tot])], ignore_index=True)
+
+
+def excel_download(df: pd.DataFrame, sheet: str, stem: str) -> None:
+    """'Download Excel' button under a table. The file holds the same rows the table shows."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        df.to_excel(xw, sheet_name=sheet[:31], index=False)
+        ws = xw.sheets[sheet[:31]]
+        for i, c in enumerate(df.columns, start=1):
+            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = max(12, min(28, len(str(c)) + 4))
+    when = month or f"{first:%Y%m%d}-{last:%Y%m%d}"
+    st.download_button("Download Excel", buf.getvalue(), file_name=f"srtpv_{stem}_{when}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key=f"dl_{stem}")
+
+
+def _day_cols(df: pd.DataFrame, extra: list[str]) -> pd.DataFrame:
+    out = df[["date", "day", *extra]].copy()
+    out["date"] = out["date"].dt.strftime("%d %b %Y")
+    return out
+
+
 def _inv_table_html(cols: list[str]) -> str:
     """One scrollable table for the whole period (header and total row stay in view).
     The Total column is the sum of the inverters shown (the plant total when all are shown)."""
@@ -924,6 +951,15 @@ def inverter_readings(with_filter: bool = False) -> None:
                                 format_func=lambda p: f"{p} · {INVERTERS[p]}", key="inv_view_pick")
         cols = [p for p in INVERTER_IDS if p in picked] or INVERTER_IDS
     st.markdown(_inv_table_html(cols), unsafe_allow_html=True)
+    src = inv if len(cols) == len(INVERTER_IDS) else inv.assign(Total=inv[cols].sum(axis=1, min_count=1).round(2))
+    tot_name = "Total" if src is inv else "Total (shown)"
+    if GROUP == "Month":
+        x = _month_rows(src, [*cols, "Total"])[["label", "days", *cols, "Total"]].rename(columns={"label": "Month", "days": "Days"})
+        x = _with_total(x, "Month", [*cols, "Total"])
+    else:
+        x = _day_cols(src, [*cols, "Total"]).rename(columns={"date": "Date", "day": "Day"})
+        x = _with_total(x, "Date", [*cols, "Total"])
+    excel_download(x.rename(columns={"Total": tot_name}), "Inverter view", "inverter_view")
     key = _roof_key()
     if len(cols) < len(INVERTER_IDS):
         key += "  ·  Total (shown) = sum of the inverters shown"
@@ -1051,7 +1087,15 @@ def statement(customer: bool = False) -> None:
                 + "".join(f'<th class="wx">{c}</th>' if c == "Weather" else f"<th>{c}</th>" for c in cols)
                 + "</tr>" + "".join(rows) + "</table></div>", unsafe_allow_html=True)
     ht_import_calc()
-    if customer:                       # customers get no Excel download
+    if customer:                       # customers download this table only (staff get the full report below)
+        names = [c.rstrip("*") for c in cols]
+        if GROUP == "Month":
+            x = m[["label", "days", "inverter_kwh", *meters]].set_axis(names, axis=1)
+            x = _with_total(x, names[0], names[2:])
+        else:
+            x = _day_cols(DAILY, ["weather", "temp_c", "wind_ms", "inverter_kwh", *meters]).set_axis(names, axis=1)
+            x = _with_total(x, names[0], names[5:])
+        excel_download(x, "Consolidated view", "consolidated_view")
         return
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
@@ -1176,6 +1220,14 @@ def lt_view() -> None:
         span = 5
     rows += f'<tr class="total"><td colspan="{span}">Total</td><td>{f0(DAILY["lt_kwh"].sum(min_count=1))}</td></tr>'
     st.markdown(f'<div class="ae-scroll"><table class="ae-t"><tr>{head}</tr>{rows}</table></div>', unsafe_allow_html=True)
+    if GROUP == "Month":
+        x = _month_rows(DAILY, ["lt_kwh"])[["label", "days", "lt_kwh"]].set_axis(["Month", "Days", "LT meter kWh"], axis=1)
+        x = _with_total(x, "Month", ["LT meter kWh"])
+    else:
+        x = _day_cols(DAILY, ["weather", "temp_c", "wind_ms", "lt_kwh"]).set_axis(
+            ["Date", "Day", "Weather", "Temp °C", "Wind m/s", "LT meter kWh"], axis=1)
+        x = _with_total(x, "Date", ["LT meter kWh"])
+    excel_download(x, "LT meter view", "lt_meter_view")
 
 
 def ht_view() -> None:
@@ -1197,6 +1249,14 @@ def ht_view() -> None:
                 '<th>Import kWh</th><th>Export kWh</th><th>Net import kWh</th></tr>' + rows + "</table></div>",
                 unsafe_allow_html=True)
     ht_import_calc()
+    names = ["Import kWh", "Export kWh", "Net import kWh"]
+    if GROUP == "Month":
+        x = _month_rows(DAILY, list(cols3))[["label", "days", *cols3]].set_axis(["Month", "Days", *names], axis=1)
+        x = _with_total(x, "Month", names)
+    else:
+        x = _day_cols(DAILY, list(cols3)).set_axis(["Date", "Day", *names], axis=1)
+        x = _with_total(x, "Date", names)
+    excel_download(x, "HT meter view", "ht_meter_view")
 
 
 def ac_loss_section() -> None:
