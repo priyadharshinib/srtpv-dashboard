@@ -24,6 +24,48 @@ def inr(amount: float | None) -> str:
     return ("-" if n < 0 else "") + "₹" + s
 
 
+BILL_LT_DISCLAIMER = "(1200 KVA HT + 20 KW LT + 16 KW LT)"
+
+
+def ht_import_breakdown(bills: dict, months: list[str]) -> dict:
+    """Total HT import on the bill, less the Bill LT (the 20 kW and 16 kW LT meters), for `months`.
+
+    populated is True only when every month has a bill with energy totals AND a Bill LT figure.
+    Otherwise the HT import still includes the two LT meters and the dashboard shows
+    BILL_LT_DISCLAIMER instead of the calculation.
+    """
+    gross = bill_lt = 0.0
+    populated = bool(months)
+    for m in months:
+        b = bills.get(m)
+        has_totals = bool(b) and all(b.get(k) is not None for k in ("lt_kwh", "ht_import_kwh", "ht_export_kwh"))
+        if not has_totals or b.get("bill_lt_kwh") is None:
+            populated = False
+            continue
+        gross += float(b["ht_import_kwh"])
+        bill_lt += float(b["bill_lt_kwh"])
+    return {"populated": populated, "gross": gross, "bill_lt": bill_lt, "net": gross - bill_lt}
+
+
+def ht_export_breakdown(bills: dict, months: list[str]) -> dict:
+    """HT export on the bill less the month's LT meter reading (Bill LT: the 20 kW and 16 kW LT meters), for `months`.
+
+    populated follows the same rule as ht_import_breakdown: every month needs a bill with energy totals
+    AND a Bill LT figure. Otherwise there is no calculation to show.
+    """
+    exp = bill_lt = 0.0
+    populated = bool(months)
+    for m in months:
+        b = bills.get(m)
+        has_totals = bool(b) and all(b.get(k) is not None for k in ("lt_kwh", "ht_import_kwh", "ht_export_kwh"))
+        if not has_totals or b.get("bill_lt_kwh") is None:
+            populated = False
+            continue
+        exp += float(b["ht_export_kwh"])
+        bill_lt += float(b["bill_lt_kwh"])
+    return {"populated": populated, "export": exp, "bill_lt": bill_lt, "net": exp - bill_lt}
+
+
 def demand_pct(md_kva: float, contract_kva: float) -> float:
     """Maximum demand as % of contract, rounded to 0.1 (99.65 -> 99.6 as on the bill)."""
     return round(md_kva / contract_kva * 100 - 1e-9, 1)

@@ -9,6 +9,8 @@
      - a no-data day gets LT total / days in month; the rest of LT follows inverter output
      - site load by day type (weekday / Sat / Sun weights), scaled to the billed total
      - HT import = site load - LT + export; export from the daily meter where available
+   The bill's HT import also counts the 20 kW and 16 kW LT meters. When the bill's "Bill LT" figure
+   is entered it is deducted first, so the HT import shown is for the 1200 KVA HT service alone.
 """
 from __future__ import annotations
 
@@ -97,7 +99,9 @@ def bill_daily(inv: pd.DataFrame, ht: pd.DataFrame, bill: dict, month: str) -> p
         exp = pd.Series(np.where(wk, exp_total / max(wk.sum(), 1), 0.0), index=d.index)
     d["ht_export_kwh"] = exp.values
 
-    site_total = float(bill["ht_import_kwh"]) - exp_total + lt_total
+    bill_lt = float(bill.get("bill_lt_kwh") or 0.0)      # not entered -> nothing deducted
+    ht_import_total = float(bill["ht_import_kwh"]) - bill_lt
+    site_total = ht_import_total - exp_total + lt_total
     dow = d["date"].dt.dayofweek
     w = np.where(dow == 5, SITE_LOAD_WEIGHTS["Sat"], np.where(dow == 6, SITE_LOAD_WEIGHTS["Sun"],
                                                               SITE_LOAD_WEIGHTS["weekday"]))

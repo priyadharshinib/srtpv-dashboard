@@ -49,7 +49,7 @@ from core.report import build_period, daily_headline, day_ranges, followups, mon
 from core.settings import get_setting
 from core.views import PROJECTED, apply_view, views_for
 from core.projection import chronic_inverters, faulty_cells, project, share_for
-from core.billing import demand_headline, demand_pct, demand_story, inr
+from core.billing import BILL_LT_DISCLAIMER, demand_headline, demand_pct, demand_story, ht_export_breakdown, ht_import_breakdown, inr
 from core.batches import ADD_NEW, ALL_MONTHS, REPLACE, REPLACE_MONTH, coverage_text, prepare_batch, split_by_month
 from core.config import CONTRACT_DEMAND_KVA, DEFAULT_EXPORT_NOTE, PROJECTION_SHARE
 
@@ -170,16 +170,16 @@ def bill_form() -> None:
     md_at = b.get("md_at") or dt.datetime.fromisoformat(month_sel + "-01 10:00")
     with st.form(f"bill_{month_sel}"):
         c1, c2, c3 = st.columns(3)
-        net = c1.number_input("Net payable (₹)", min_value=0.0, step=1.0, value=float(b.get("net_payable") or 0))
+        net = c1.number_input("Net payable (₹) (optional)", min_value=0.0, step=1.0, value=float(b.get("net_payable") or 0))
         pen = c2.number_input("PF penalty (₹)", min_value=0.0, step=1.0, value=float(b.get("pf_penalty") or 0))
-        pf = c3.number_input("Average power factor", min_value=0.0, max_value=1.0, step=0.001, format="%.3f",
-                             value=float(b.get("avg_pf") or 0.95))
+        pf = c3.number_input("Average power factor (optional, 0 = not shown)", min_value=0.0, max_value=1.0, step=0.001,
+                             format="%.3f", value=float(b.get("avg_pf") or 0))
         c4, c5 = st.columns(2)
         adj_label = c4.text_input("Other charge on the bill (name)", value=b.get("adjustment_label") or "",
                                   placeholder="e.g. FY25 true-up")
         adj = c5.number_input("Other charge (₹)", step=1.0, value=float(b.get("adjustment_amount") or 0))
         c6, c7, c8, c9 = st.columns(4)
-        md = c6.number_input("Maximum demand (kVA)", min_value=0.0, step=0.1, format="%.1f",
+        md = c6.number_input("Maximum demand (kVA) (optional)", min_value=0.0, step=0.1, format="%.1f",
                              value=float(b.get("max_demand_kva") or 0))
         md_date = c7.date_input("MD date", value=md_at.date(), format="DD-MM-YYYY")
         md_time = c8.time_input("MD time", value=md_at.time(), step=900)
@@ -190,8 +190,15 @@ def bill_form() -> None:
         e1, e2, e3 = st.columns(3)
         lt_units = e1.number_input(f"SRTPV (LT) meter units (× {LT_METER_MF})", min_value=0.0, step=0.1,
                                    format="%.1f", value=float(b.get("lt_units") or 0))
-        ht_imp = e2.number_input("HT import (kWh)", min_value=0.0, step=1.0, value=float(b.get("ht_import_kwh") or 0))
+        ht_imp = e2.number_input("Total HT import (kWh)", min_value=0.0, step=1.0, value=float(b.get("ht_import_kwh") or 0))
         ht_exp = e3.number_input("HT export (kWh)", min_value=0.0, step=1.0, value=float(b.get("ht_export_kwh") or 0))
+        st.markdown("**LT meter readings for the month** (20 KW LT + 16 KW LT meters on the bill, "
+                    "not the SRTPV solar generation above)")
+        bill_lt = st.number_input("Bill LT meter reading for the month (kWh)", min_value=0.0, step=0.1, format="%.1f",
+                                  value=float(b.get("bill_lt_kwh") or 0),
+                                  help="Deducted from the total HT import (the result is the HT import shown) and from the "
+                                       "HT export (HT export - LT meter reading). Leave 0 if not available; the dashboard "
+                                       "then shows the small disclaimer instead.")
         meter_note = st.text_input("HT meter note (optional)", value=b.get("meter_note") or "",
                                    placeholder="e.g. New bi-directional meter, readings 02 Sep–01 Oct")
         st.markdown("**Inverter issue for the month** (optional, shown next to 'Month total by inverter')")
@@ -201,16 +208,19 @@ def bill_form() -> None:
         inv_b = n2.text_input("Details", value=b.get("inverter_note_body") or "",
                               placeholder="e.g. Internet link changed to air fiber")
         if st.form_submit_button("Save bill", type="primary"):
-            if net <= 0 or md <= 0:
-                st.error("Enter at least the net payable and the maximum demand.")
+            if not (ht_imp or lt_units or net or md):
+                st.error("Enter at least the energy totals (or the net payable / maximum demand).")
+            elif bill_lt and bill_lt >= ht_imp:
+                st.error("Bill LT must be less than the total HT import.")
             else:
                 db.save_bill(month_sel, {
-                    "net_payable": net, "pf_penalty": pen, "adjustment_label": adj_label.strip(),
-                    "adjustment_amount": adj if adj_label.strip() else None, "avg_pf": pf,
-                    "max_demand_kva": md, "md_at": dt.datetime.combine(md_date, md_time),
+                    "net_payable": net or None, "pf_penalty": pen or None, "adjustment_label": adj_label.strip(),
+                    "adjustment_amount": adj if adj_label.strip() else None, "avg_pf": pf or None,
+                    "max_demand_kva": md or None, "md_at": dt.datetime.combine(md_date, md_time) if md else None,
                     "contract_demand_kva": cd, "export_note": note.strip(),
                     "lt_units": lt_units or None, "lt_kwh": lt_units * LT_METER_MF if lt_units else None,
                     "ht_import_kwh": ht_imp or None, "ht_export_kwh": ht_exp if ht_imp else None,
+                    "bill_lt_kwh": bill_lt if (bill_lt and ht_imp) else None,
                     "meter_note": meter_note.strip(), "inverter_note_title": inv_t.strip(),
                     "inverter_note_body": inv_b.strip(),
                 })
@@ -456,6 +466,17 @@ with st.sidebar:
     RAW_INV = inv_all.copy()                       # actual readings, for the actual-vs-projected table
     SHARES = projection_shares()
     viewed = apply_view(inv_all, VIEW, SHARES)
+    
+
+    # TEMPORARY BYPASS: Show actual inverter readings on 03-Nov-2026
+    if VIEW != "Actual":
+        nov_3_mask = (
+            pd.to_datetime(RAW_INV["date"]).dt.date
+            == pd.Timestamp("2026-11-03").date()
+        )
+
+        for p in INVERTER_IDS:
+         viewed.loc[nov_3_mask, p] = RAW_INV.loc[nov_3_mask, p]
     if not ALL_SEL:
         viewed["Total"] = viewed[SEL].sum(axis=1, min_count=1).round(2)
     inv_all = enrich(viewed, PLANT_CAPACITY_KWP * len(SEL) / len(INVERTER_IDS))
@@ -598,6 +619,12 @@ table.ae-t{border-collapse:collapse;width:100%;font-size:.86rem}
 .ae-t tr.low td{color:#C0392B}.ae-t tr.lowbg td{background:#FBE6E3}
 .ae-t td.flag{background:#F9E1DE !important;color:#C0392B !important;font-weight:700}
 .ae-inv tr.low td{color:#7B8794}.ae-inv td.flag{background:#E9ECEF !important;color:#5B6B7B !important;font-weight:700}
+.ae-t.ae-grey tr.lowbg td{background:#E9ECEF}
+.ae-calc{margin:8px 0 0 auto;max-width:430px;border-top:2px solid #1C2B3A;padding-top:4px}
+.ae-calc table{width:100%;border-collapse:collapse;font-size:.86rem}
+.ae-calc td{padding:3px 9px;color:#1C2B3A}.ae-calc td+td{text-align:right;white-space:nowrap}
+.ae-calc tr.net td{font-weight:700;border-top:1px solid #1C2B3A}
+.ae-calc .sm,.ae-ltnote{color:#5B6B7B;font-size:.72rem}.ae-ltnote{text-align:right;margin-top:4px}
 .ae-t td.proj{color:#2A6FB0 !important}.ae-t td.proj::after{content:" p";font-size:.7em;vertical-align:super}
 .ae-t tr.total td{background:#E3E7ED;font-weight:700}
 .ae-t td.wx{text-align:left;white-space:normal;min-width:180px}.ae-t th.wx{text-align:left}
@@ -693,11 +720,12 @@ def at_a_glance(customer: bool = False) -> None:
         card("panel", "amber", f"{KPIS['inverter_kwh']:,.0f}", "Inverter generation", (f"kWh · {_short(first, last)}{SEL_NOTE}" if IS_CUSTOMER else f"kWh · {DATA_WORD} · {_short(first, last)}{SEL_NOTE}")),
         card("gauge", "teal", f"{KPIS['lt_kwh']:,.0f}", "LT meter generation", lt_note),
         card("down", "navy", f"{KPIS['ht_import_kwh']:,.0f}", "HT grid import", ht_note),
-        card("up", "coral", f"{KPIS['ht_export_kwh']:,.0f}", "HT grid export", ht_note),
+        card("up", "coral", f"{KPIS['ht_export_kwh']:,.0f}", "HT grid export",
+             ht_note + ((" · " + BILL["export_note"]) if (BILL or {}).get("export_note") else "")),
         card("factory", "slate", f"{KPIS['site_load_kwh']:,.0f}", "Site consumption", "kWh · HT net import + LT solar"),
         card("pie", "amber", f"{KPIS['solar_share']:.0%}", "Solar share of load", "LT solar ÷ site consumption"),
     ]
-    st.markdown('<div class="ae-grid">' + "".join(cards_html) + "</div>", unsafe_allow_html=True)
+    st.markdown('<div class="ae-grid">' + "".join(cards_html) + ht_calc_cards() + "</div>", unsafe_allow_html=True)
 
 
 def bill_slide() -> None:
@@ -708,6 +736,8 @@ def bill_slide() -> None:
             st.info(f"No HT bill entered for {MONTH_NAME} yet. Add it under Import data → Monthly HT bill.")
         return
     has_md = BILL.get("max_demand_kva") and BILL.get("md_at") and BILL.get("contract_demand_kva")
+    if not (BILL.get("net_payable") or has_md or BILL.get("avg_pf")):
+        return                          # bill saved with energy totals only: nothing to showcase here
     h2(f"{MONTH_NAME} {P_START:%Y} bill", demand_headline(BILL, inv_all) if has_md else "")
     extras = []
     if BILL.get("pf_penalty"):
@@ -937,13 +967,67 @@ def grid_exchange() -> None:
     side = [f'<div class="ae-card"><h4>{ico("down", "navy")}<span class="ae-serif" style="font-size:1.9rem;font-weight:400">'
             f'{KPIS["ht_import_kwh"]:,.0f}</span></h4><div class="n">kWh imported ({tag})</div></div>',
             f'<div class="ae-card"><h4>{ico("up", "coral")}<span class="ae-serif" style="font-size:1.9rem;font-weight:400">'
-            f'{KPIS["ht_export_kwh"]:,.0f}</span></h4><div class="n">kWh exported ({tag})</div></div>',
+            f'{KPIS["ht_export_kwh"]:,.0f}</span></h4><div class="n">kWh exported ({tag})</div>'
+            + (f'<div class="n">{escape(BILL["export_note"])}</div>' if (BILL or {}).get("export_note") else "") + '</div>',
             f'<div class="ae-card"><h4>{ico("bolt", "slate")}<span class="ae-serif" style="font-size:1.9rem;font-weight:400">'
             f'{KPIS["ht_net_kwh"]:,.0f}</span></h4><div class="n">kWh net import</div></div>']
     note = (BILL or {}).get("meter_note") or ""
     with c2:
         st.markdown('<div class="ae-side">' + "".join(side) + "</div>"
                     + (f'<div class="ae-key">{escape(note)}</div>' if note else ""), unsafe_allow_html=True)
+
+
+def ht_import_calc() -> None:
+    """Under the Consolidated and HT tables: Total HT import - Bill LT = HT import, and
+    HT export - LT meter reading, with the month's export note.
+    If the month's Bill LT is not entered, only the small disclaimer is shown (plus the export note)."""
+    months = month_list(P_START, P_END)
+    b = ht_import_breakdown(BILLS, months)
+    e = ht_export_breakdown(BILLS, months)
+    if not b["populated"]:
+        st.markdown(f'<div class="ae-ltnote">HT import {escape(BILL_LT_DISCLAIMER)}</div>', unsafe_allow_html=True)
+    elif not filtered:                  # with weather/health filters on, the table covers only some days
+        st.markdown(
+            '<div class="ae-calc"><table>'
+            f'<tr><td>Total HT import (as per bill)</td><td>{b["gross"]:,.1f}</td></tr>'
+            '<tr><td>Less: LT meter reading <span class="sm">(20 KW LT + 16 KW LT)</span></td>'
+            f'<td>− {b["bill_lt"]:,.1f}</td></tr>'
+            f'<tr class="net"><td>HT import</td><td>{b["net"]:,.1f}</td></tr>'
+            "</table></div>", unsafe_allow_html=True)
+        if e["populated"]:
+            st.markdown(
+                '<div class="ae-calc"><table>'
+                f'<tr><td>HT export (as per bill)</td><td>{e["export"]:,.1f}</td></tr>'
+                '<tr><td>Less: LT meter reading <span class="sm">(20 KW LT + 16 KW LT)</span></td>'
+                f'<td>− {e["bill_lt"]:,.1f}</td></tr>'
+                f'<tr class="net"><td>HT export − LT meter reading</td><td>{e["net"]:,.1f}</td></tr>'
+                "</table></div>", unsafe_allow_html=True)
+    export_note = (BILL or {}).get("export_note") or ""
+    if export_note and not filtered:
+        st.markdown(f'<div class="ae-ltnote">HT export note: {escape(export_note)}</div>', unsafe_allow_html=True)
+
+
+def ht_calc_cards() -> str:
+    """Three extra dashboard cards (only when the month's LT meter reading is entered)."""
+    months = month_list(P_START, P_END)
+    b = ht_import_breakdown(BILLS, months)
+    e = ht_export_breakdown(BILLS, months)
+    if not (b["populated"] and e["populated"]) or filtered:
+        return ""
+    return "".join([
+        card("down", "navy", f"{b['gross']:,.0f}", "Total HT import (bill)", "kWh · before LT meter deduction"),
+        card("gauge", "amber", f"{b['bill_lt']:,.1f}", "LT meter reading", "kWh · 20 KW LT + 16 KW LT meters"),
+        card("up", "coral", f"{e['net']:,.1f}", "HT export − LT meter reading",
+             f"kWh · {e['export']:,.0f} export − {e['bill_lt']:,.1f} LT"),
+    ])
+
+
+def consolidated_inverter_note() -> None:
+    """Customer Consolidated tab: the month's inverter note (written by admins, same text as under the Inverter view table)."""
+    inv_note = db.load_inverter_note(month) if month else ""
+    if inv_note:
+        st.markdown('<div class="ae-card" style="margin-top:10px"><h4>Note</h4><div class="n">'
+                    + escape(inv_note).replace("\n", "<br>") + "</div></div>", unsafe_allow_html=True)
 
 
 def statement(customer: bool = False) -> None:
@@ -987,9 +1071,10 @@ def statement(customer: bool = False) -> None:
     label = f"Total {MONTH_NAME}" if (month and not filtered) else f"Total {_span(first, last)}"
     rows.append(f'<tr class="total"><td colspan="{span}">{label}</td><td>{f0(DAILY["inverter_kwh"].sum(min_count=1))}</td>'
                 + "".join(f"<td>{f0(DAILY[c].sum(min_count=1))}</td>" for c in meters) + "</tr>")
-    st.markdown('<div class="ae-scroll"><table class="ae-t"><tr>'
+    st.markdown(f'<div class="ae-scroll"><table class="ae-t{" ae-grey" if customer else ""}"><tr>'
                 + "".join(f'<th class="wx">{c}</th>' if c == "Weather" else f"<th>{c}</th>" for c in cols)
                 + "</tr>" + "".join(rows) + "</table></div>", unsafe_allow_html=True)
+    ht_import_calc()
     if customer:                       # customers get no Excel download
         return
     buf = io.BytesIO()
@@ -1135,6 +1220,7 @@ def ht_view() -> None:
     st.markdown(f'<div class="ae-scroll" style="margin-top:12px"><table class="ae-t"><tr>{head}'
                 '<th>Import kWh</th><th>Export kWh</th><th>Net import kWh</th></tr>' + rows + "</table></div>",
                 unsafe_allow_html=True)
+    ht_import_calc()
 
 
 def ac_loss_section() -> None:
@@ -1257,6 +1343,7 @@ def dashboard(can_edit_notes: bool, show_grafana: bool) -> None:
             ht_view()
         with t_all:
             pv_system_comparison()
+            consolidated_inverter_note()
             inverter_vs_lt_bars()
             statement(customer=True)
         return

@@ -103,6 +103,8 @@ class MonthlyBill(Base):
     lt_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
     ht_import_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
     ht_export_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Energy of the 20 kW + 16 kW LT meters that sits inside the HT bill import; deducted from it
+    bill_lt_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
     meter_note: Mapped[str] = mapped_column(Text, default="")
     inverter_note_title: Mapped[str] = mapped_column(Text, default="")
     inverter_note_body: Mapped[str] = mapped_column(Text, default="")
@@ -161,6 +163,7 @@ NEW_COLUMNS = [  # (table, column, postgres type, sqlite type)
     ("monthly_bills", "lt_kwh", "double precision", "FLOAT"),
     ("monthly_bills", "ht_import_kwh", "double precision", "FLOAT"),
     ("monthly_bills", "ht_export_kwh", "double precision", "FLOAT"),
+    ("monthly_bills", "bill_lt_kwh", "double precision", "FLOAT"),
     ("monthly_bills", "meter_note", "text DEFAULT ''", "TEXT DEFAULT ''"),
     ("monthly_bills", "inverter_note_title", "text DEFAULT ''", "TEXT DEFAULT ''"),
     ("monthly_bills", "inverter_note_body", "text DEFAULT ''", "TEXT DEFAULT ''"),
@@ -406,7 +409,7 @@ def fill_weather(rows: pd.DataFrame) -> int:
 
 BILL_FIELDS = ["net_payable", "pf_penalty", "adjustment_label", "adjustment_amount", "avg_pf",
                "max_demand_kva", "md_at", "contract_demand_kva", "export_note",
-               "lt_units", "lt_kwh", "ht_import_kwh", "ht_export_kwh",
+               "lt_units", "lt_kwh", "ht_import_kwh", "ht_export_kwh", "bill_lt_kwh",
                "meter_note", "inverter_note_title", "inverter_note_body"]
 
 

@@ -499,3 +499,54 @@ def test_day_ranges():
     assert day_ranges(pd.date_range("2026-10-14", "2026-10-30")) == "14–30 Oct"
     assert day_ranges(pd.to_datetime(["2026-10-03", "2026-10-07", "2026-10-08"])) == "03 Oct, 07–08 Oct"
     assert day_ranges(pd.to_datetime(["2026-10-31", "2026-11-01"])) == "31 Oct – 01 Nov"
+
+
+# ---------------------------------------------------------------------
+# Bill LT: the 20 kW + 16 kW LT meters inside the HT bill import
+# ---------------------------------------------------------------------
+def _oct_inputs():
+    days = pd.date_range("2026-10-01", "2026-10-31")
+    inv = pd.DataFrame({"date": days, "Total": 3000.0})
+    ht = pd.DataFrame(columns=["date", "export_kwh", "power_factor"])
+    return inv, ht
+
+
+def test_bill_lt_is_deducted_from_billed_ht_import():
+    from core.estimation import bill_daily
+    inv, ht = _oct_inputs()
+    bill = {"lt_kwh": 90000.0, "ht_import_kwh": 280602.0, "ht_export_kwh": 4056.0, "bill_lt_kwh": 3212.3}
+    d = bill_daily(inv, ht, bill, "2026-10")
+    assert round(d["ht_import_kwh"].sum(), 1) == 277389.7          # 280602 - 3212.3, as in the handwritten note
+    assert round(d["ht_export_kwh"].sum()) == 4056                  # export is not touched
+    assert round(d["ht_net_kwh"].sum(), 1) == round(277389.7 - 4056, 1)
+
+
+def test_bill_lt_missing_changes_nothing():
+    from core.estimation import bill_daily
+    inv, ht = _oct_inputs()
+    base = {"lt_kwh": 90000.0, "ht_import_kwh": 280602.0, "ht_export_kwh": 4056.0}
+    for extra in ({}, {"bill_lt_kwh": None}):
+        d = bill_daily(inv, ht, {**base, **extra}, "2026-10")
+        assert round(d["ht_import_kwh"].sum()) == 280602
+
+
+def test_ht_import_breakdown():
+    from core.billing import BILL_LT_DISCLAIMER, ht_import_breakdown
+    full = {"lt_kwh": 1.0, "ht_import_kwh": 280602.0, "ht_export_kwh": 4056.0, "bill_lt_kwh": 3212.3}
+    b = ht_import_breakdown({"2026-10": full}, ["2026-10"])
+    assert b["populated"] and round(b["net"], 1) == 277389.7 and b["gross"] == 280602.0
+    # Bill LT not entered, no bill at all, or only one of two months entered -> disclaimer case
+    assert not ht_import_breakdown({"2026-10": {**full, "bill_lt_kwh": None}}, ["2026-10"])["populated"]
+    assert not ht_import_breakdown({}, ["2026-10"])["populated"]
+    assert not ht_import_breakdown({"2026-10": full, "2026-09": {**full, "bill_lt_kwh": None}},
+                                   ["2026-09", "2026-10"])["populated"]
+    assert BILL_LT_DISCLAIMER == "(1200 KVA HT + 20 KW LT + 16 KW LT)"
+
+
+def test_ht_export_breakdown():
+    from core.billing import ht_export_breakdown
+    full = {"lt_kwh": 1.0, "ht_import_kwh": 280602.0, "ht_export_kwh": 4056.0, "bill_lt_kwh": 3212.3}
+    b = ht_export_breakdown({"2026-10": full}, ["2026-10"])
+    assert b["populated"] and b["export"] == 4056.0 and round(b["net"], 1) == 843.7   # 4056 - 3212.3
+    assert not ht_export_breakdown({"2026-10": {**full, "bill_lt_kwh": None}}, ["2026-10"])["populated"]
+    assert not ht_export_breakdown({}, ["2026-10"])["populated"]
