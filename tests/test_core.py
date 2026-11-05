@@ -586,3 +586,17 @@ def test_bill_totals_fallback_only_for_month_without_ht_readings():
     assert bill_totals_fallback(k, bills, [], has_ht, s, e)[0] == k
     assert bill_totals_fallback(k, bills, [], empty, s, pd.Timestamp("2026-08-20"))[0] == k
     assert bill_totals_fallback(k, {"2026-08": None}, [], empty, s, e)[0] == k
+
+
+def test_bill_totals_fallback_uses_inverter_when_no_lt_readings():
+    from core.report import bill_totals_fallback
+    k = {"lt_kwh": 0.0, "ht_import_kwh": 0.0, "ht_export_kwh": 0.0, "ht_net_kwh": 0.0, "site_load_kwh": 0.0,
+         "solar_share": 0.0}
+    bills = {"2026-08": {"ht_import_kwh": 333420.0, "ht_export_kwh": 0.0, "bill_lt_kwh": None}}
+    s, e = pd.Timestamp("2026-08-01"), pd.Timestamp("2026-08-31")
+    empty_ht = pd.DataFrame({"date": pd.to_datetime([])})
+    empty_lt = pd.DataFrame({"from_date": pd.to_datetime([])})
+    inv = pd.DataFrame({"date": pd.to_datetime(["2026-08-01", "2026-08-02"]), "Total": [40000.0, 60000.0]})
+    out, used = bill_totals_fallback(k, bills, [], empty_ht, s, e, inv, empty_lt)
+    assert used == ["2026-08"] and out["site_load_kwh"] == 433420.0
+    assert round(out["solar_share"], 4) == round(100000 / 433420, 4)

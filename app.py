@@ -549,7 +549,7 @@ first, last = inv["date"].min(), inv["date"].max()
 KPIS = headline_kpis(inv, lt, ht)
 HT_FROM_BILL: list[str] = []
 if not filtered:                       # a month with only HT bill totals (no daily HT readings) uses the bill totals
-    KPIS, HT_FROM_BILL = bill_totals_fallback(KPIS, BILLS, BILL_MONTHS, ht, P_START, P_END)
+    KPIS, HT_FROM_BILL = bill_totals_fallback(KPIS, BILLS, BILL_MONTHS, ht, P_START, P_END, inv, lt)
 GRID = grid_summary(ht, lt)
 BILL = BILLS.get(month) if month else None
 BILL_BASED = bool(month) and month in BILL_MONTHS
@@ -734,7 +734,9 @@ def at_a_glance(customer: bool = False) -> None:
     st.markdown('<div class="ae-grid">' + "".join(cards_html) + "</div>", unsafe_allow_html=True)
     if HT_FROM_BILL:
         names = ", ".join(pd.Timestamp(m + "-01").strftime("%B") for m in HT_FROM_BILL)
-        st.caption(f"HT grid import and export for {names} are the HT bill totals (no date-wise HT meter readings).")
+        extra = (" Solar generation is taken from the inverters (no LT meter reading)."
+                 if KPIS.get("solar_from_inverter_kwh") else "")
+        st.caption(f"HT grid import and export for {names} are the HT bill totals (no date-wise HT meter readings)." + extra)
 
 def bill_slide() -> None:
     if not month:

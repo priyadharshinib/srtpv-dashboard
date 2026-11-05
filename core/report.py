@@ -99,15 +99,21 @@ def fill_bill_lt(bills: dict, lt: pd.DataFrame) -> dict:
 
 
 def bill_totals_fallback(kpis: dict, bills: dict, bill_months: list[str], ht: pd.DataFrame,
-                         start: pd.Timestamp, end: pd.Timestamp) -> tuple[dict, list[str]]:
+                         start: pd.Timestamp, end: pd.Timestamp, inv: pd.DataFrame | None = None,
+                         lt: pd.DataFrame | None = None) -> tuple[dict, list[str]]:
     """At-a-glance figures for a month that has the HT bill totals but no HT meter readings.
 
     Used only for a month that (a) is not already bill-based (no LT total, so build_period could not use
     the bill), (b) has no daily HT readings, (c) is fully inside the period, and (d) has the bill's total
     HT import and export. Its totals are added to the KPIs; every other month and every figure of a month
     that has HT readings are left exactly as they were. Returns (kpis, months_used).
+
+    Solar generation for such a month is the LT meter reading; when the month has no LT readings it is the
+    inverter generation (the plant's solar generation), so site consumption = HT net import - LT meters +
+    solar generation. The inverter kWh used this way is returned as kpis["solar_from_inverter_kwh"].
     """
     out, used = dict(kpis), []
+    solar_inv = 0.0
     for m in month_list(start, end):
         b = bills.get(m)
         if m in bill_months or not b or b.get("ht_import_kwh") is None or b.get("ht_export_kwh") is None:
@@ -122,10 +128,18 @@ def bill_totals_fallback(kpis: dict, bills: dict, bill_months: list[str], ht: pd
         out["ht_import_kwh"] += imp
         out["ht_export_kwh"] += exp
         out["ht_net_kwh"] += imp - exp
-        out["site_load_kwh"] += imp - float(b.get("bill_lt_kwh") or 0.0) - exp   # LT solar is already in the KPI
+        solar_extra = 0.0
+        has_lt = lt is not None and len(lt) and lt["from_date"].between(m_start, m_end).any()
+        if not has_lt and inv is not None and len(inv):
+            solar_extra = float(inv.loc[inv["date"].between(m_start, m_end), "Total"].sum())
+        solar_inv += solar_extra
+        # LT solar (when present) is already in the KPI; with no LT readings the inverter generation stands in
+        out["site_load_kwh"] += imp - float(b.get("bill_lt_kwh") or 0.0) - exp + solar_extra
         used.append(m)
     if used:
-        out["solar_share"] = out["lt_kwh"] / out["site_load_kwh"] if out["site_load_kwh"] else 0.0
+        out["solar_from_inverter_kwh"] = solar_inv
+        solar = out["lt_kwh"] + solar_inv
+        out["solar_share"] = solar / out["site_load_kwh"] if out["site_load_kwh"] else 0.0
     return out, used
 
 
