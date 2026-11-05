@@ -98,6 +98,37 @@ def fill_bill_lt(bills: dict, lt: pd.DataFrame) -> dict:
     return out
 
 
+def bill_totals_fallback(kpis: dict, bills: dict, bill_months: list[str], ht: pd.DataFrame,
+                         start: pd.Timestamp, end: pd.Timestamp) -> tuple[dict, list[str]]:
+    """At-a-glance figures for a month that has the HT bill totals but no HT meter readings.
+
+    Used only for a month that (a) is not already bill-based (no LT total, so build_period could not use
+    the bill), (b) has no daily HT readings, (c) is fully inside the period, and (d) has the bill's total
+    HT import and export. Its totals are added to the KPIs; every other month and every figure of a month
+    that has HT readings are left exactly as they were. Returns (kpis, months_used).
+    """
+    out, used = dict(kpis), []
+    for m in month_list(start, end):
+        b = bills.get(m)
+        if m in bill_months or not b or b.get("ht_import_kwh") is None or b.get("ht_export_kwh") is None:
+            continue
+        m_start = pd.Timestamp(m + "-01")
+        m_end = m_start + pd.offsets.MonthEnd(0)
+        if start > m_start or end < m_end:
+            continue
+        if len(ht) and ht["date"].between(m_start, m_end).any():
+            continue
+        imp, exp = float(b["ht_import_kwh"]), float(b["ht_export_kwh"])
+        out["ht_import_kwh"] += imp
+        out["ht_export_kwh"] += exp
+        out["ht_net_kwh"] += imp - exp
+        out["site_load_kwh"] += imp - float(b.get("bill_lt_kwh") or 0.0) - exp   # LT solar is already in the KPI
+        used.append(m)
+    if used:
+        out["solar_share"] = out["lt_kwh"] / out["site_load_kwh"] if out["site_load_kwh"] else 0.0
+    return out, used
+
+
 def build_period(inv: pd.DataFrame, lt: pd.DataFrame, ht: pd.DataFrame, bills: dict[str, dict | None],
                  start: pd.Timestamp, end: pd.Timestamp):
     """Combine imported data and bill totals for a period.

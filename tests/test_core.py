@@ -567,3 +567,22 @@ def test_bill_without_lt_units_uses_imported_lt_meter_total():
     out = fill_bill_lt({"2026-10": bill, "2026-09": None}, lt)
     assert out["2026-10"]["lt_kwh"] == 1500.0 and bill["lt_kwh"] is None and out["2026-09"] is None
     assert round(ht_import_breakdown(out, ["2026-10"])["net"], 1) == 277389.7
+
+
+def test_bill_totals_fallback_only_for_month_without_ht_readings():
+    from core.report import bill_totals_fallback
+    k = {"lt_kwh": 1000.0, "ht_import_kwh": 0.0, "ht_export_kwh": 0.0, "ht_net_kwh": 0.0, "site_load_kwh": 1000.0,
+         "solar_share": 1.0}
+    bills = {"2026-08": {"lt_kwh": None, "ht_import_kwh": 5000.0, "ht_export_kwh": 200.0, "bill_lt_kwh": 300.0}}
+    s, e = pd.Timestamp("2026-08-01"), pd.Timestamp("2026-08-31")
+    empty = pd.DataFrame({"date": pd.to_datetime([])})
+    out, used = bill_totals_fallback(k, bills, [], empty, s, e)
+    assert used == ["2026-08"] and out["ht_import_kwh"] == 5000.0 and out["ht_net_kwh"] == 4800.0
+    assert out["site_load_kwh"] == 1000.0 + 5000 - 300 - 200 and round(out["solar_share"], 4) == round(1000 / 5500, 4)
+    assert k["ht_import_kwh"] == 0.0                                  # input untouched
+    # unchanged when: already bill-based, HT readings exist, partial month, or no bill totals
+    assert bill_totals_fallback(k, bills, ["2026-08"], empty, s, e)[0] == k
+    has_ht = pd.DataFrame({"date": pd.to_datetime(["2026-08-05"])})
+    assert bill_totals_fallback(k, bills, [], has_ht, s, e)[0] == k
+    assert bill_totals_fallback(k, bills, [], empty, s, pd.Timestamp("2026-08-20"))[0] == k
+    assert bill_totals_fallback(k, {"2026-08": None}, [], empty, s, e)[0] == k
