@@ -9,8 +9,10 @@
      - a no-data day gets LT total / days in month; the rest of LT follows inverter output
      - site load by day type (weekday / Sat / Sun weights), scaled to the billed total
      - HT import = site load - LT + export; export from the daily meter where available
-   The bill's HT import also counts the 20 kW and 16 kW LT meters. When the bill's "Bill LT" figure
-   is entered it is deducted first, so the HT import shown is for the 1200 KVA HT service alone.
+   The bill's HT import also counts the 20 kW and 16 kW LT meters. The daily HT import columns add up to
+   the billed total as it is (the deduction is shown separately under the tables). When the bill's
+   "Bill LT" figure is entered, site load is worked out without it, and it is spread over the days in the
+   bill_lt_kwh column so the KPIs can leave the two LT meters out of the plant's consumption.
 """
 from __future__ import annotations
 
@@ -106,7 +108,8 @@ def bill_daily(inv: pd.DataFrame, ht: pd.DataFrame, bill: dict, month: str) -> p
     w = np.where(dow == 5, SITE_LOAD_WEIGHTS["Sat"], np.where(dow == 6, SITE_LOAD_WEIGHTS["Sun"],
                                                               SITE_LOAD_WEIGHTS["weekday"]))
     d["site_load_kwh"] = site_total * w / w.sum()
-    d["ht_import_kwh"] = d["site_load_kwh"] - d["lt_kwh"] + d["ht_export_kwh"]
+    d["bill_lt_kwh"] = bill_lt * w / w.sum()
+    d["ht_import_kwh"] = d["site_load_kwh"] - d["lt_kwh"] + d["ht_export_kwh"] + d["bill_lt_kwh"]
     d["ht_net_kwh"] = d["ht_import_kwh"] - d["ht_export_kwh"]
     d["power_factor"] = d["date"].map(ht_by_date["power_factor"]) if len(ht) and "power_factor" in ht else np.nan
     return d
@@ -124,5 +127,6 @@ def as_lt_ht(daily: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         "date": daily["date"], "day": daily["date"].dt.strftime("%a"), "import_kwh": daily["ht_import_kwh"],
         "export_kwh": daily["ht_export_kwh"], "net_import_kwh": daily["ht_net_kwh"],
         "power_factor": daily["power_factor"], "note": "estimated from bill",
+        "bill_lt_kwh": daily["bill_lt_kwh"],
     })
     return lt, ht

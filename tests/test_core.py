@@ -511,14 +511,30 @@ def _oct_inputs():
     return inv, ht
 
 
-def test_bill_lt_is_deducted_from_billed_ht_import():
+def test_bill_lt_is_kept_out_of_site_load_but_table_adds_up_to_the_bill():
     from core.estimation import bill_daily
     inv, ht = _oct_inputs()
     bill = {"lt_kwh": 90000.0, "ht_import_kwh": 280602.0, "ht_export_kwh": 4056.0, "bill_lt_kwh": 3212.3}
     d = bill_daily(inv, ht, bill, "2026-10")
-    assert round(d["ht_import_kwh"].sum(), 1) == 277389.7          # 280602 - 3212.3, as in the handwritten note
+    assert round(d["ht_import_kwh"].sum(), 1) == 280602.0           # table total = column sum = bill import
+    assert round(d["bill_lt_kwh"].sum(), 1) == 3212.3                # the deduction shown under the table
+    assert round(d["ht_import_kwh"].sum() - d["bill_lt_kwh"].sum(), 1) == 277389.7   # 280602 - 3212.3, as in the note
     assert round(d["ht_export_kwh"].sum()) == 4056                  # export is not touched
-    assert round(d["ht_net_kwh"].sum(), 1) == round(277389.7 - 4056, 1)
+    assert round(d["ht_net_kwh"].sum(), 1) == round(280602.0 - 4056, 1)
+    assert round(d["site_load_kwh"].sum(), 1) == round(277389.7 - 4056 + 90000, 1)    # LT meters not plant load
+
+
+def test_kpis_leave_the_lt_meters_out_of_site_consumption():
+    from core.calculations import grid_summary, headline_kpis
+    from core.estimation import as_lt_ht, bill_daily
+    inv, ht = _oct_inputs()
+    bill = {"lt_kwh": 90000.0, "ht_import_kwh": 280602.0, "ht_export_kwh": 4056.0, "bill_lt_kwh": 3212.3}
+    d = bill_daily(inv, ht, bill, "2026-10")
+    lt, htd = as_lt_ht(d)
+    k = headline_kpis(inv, lt, htd)
+    assert round(k["ht_import_kwh"]) == 280602
+    assert round(k["site_load_kwh"], 1) == round(277389.7 - 4056 + 90000, 1)
+    assert round(grid_summary(htd, lt)["site_load_kwh"], 1) == round(k["site_load_kwh"], 1)
 
 
 def test_bill_lt_missing_changes_nothing():

@@ -33,7 +33,8 @@ def headline_kpis(
     imp = float(ht["import_kwh"].sum())
     exp = float(ht["export_kwh"].sum())
     net = float(ht["net_import_kwh"].sum())
-    site_load = net + lt_kwh
+    lt_meters = float(ht["bill_lt_kwh"].sum()) if "bill_lt_kwh" in ht.columns else 0.0   # 20 kW + 16 kW LT meters
+    site_load = net - lt_meters + lt_kwh
 
     if compare_through is None:
         compare_through = inv["date"].max()
@@ -195,7 +196,8 @@ def grid_summary(ht: pd.DataFrame, lt: pd.DataFrame) -> dict:
     eb_import = float(ht["import_kwh"].sum())
     export = float(ht["export_kwh"].sum())
     net = eb_import - export
-    load = net + generated
+    lt_meters = float(ht["bill_lt_kwh"].sum()) if "bill_lt_kwh" in ht.columns else 0.0
+    load = net - lt_meters + generated
     return {
         "generated_kwh": generated,
         "eb_import_kwh": eb_import,
