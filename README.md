@@ -66,7 +66,14 @@ All roles see the same dashboard. Only PV1–PV9 values differ between views.
   method: an inverter that is faulty (blank, or below 70% of the other inverters in its group) on at
   least half of a month's days gets 10% of each day's actual total, and every inverter's reading is
   scaled down to match. Day and month totals are always the actual figures. Reproduces the September 2026
-  report's inverter table to the cent. The share is 10% (`PROJECTION_SHARE`) unless a different share is saved for that month in the
+  report's inverter table to the cent.
+  **From 1 Oct 2026 only** (`PEER_CHECK_FROM`), a reading is also faulty when it is more than 50 kWh
+  (`PEER_TOLERANCE_KWH`) above or below the median of the inverters at the same place (`PEER_GROUPS`:
+  PV1-3, PV4-6, PV7-9) that day. August and September 2026 are judged by the original rule only.
+  Also from October 2026 the fill changes: on a day when such an inverter's own reading is faulty it is
+  filled with the average of the healthy inverters at the same place (so PV4 lands within 50 kWh of PV5 and
+  PV6), the other readings are scaled by one factor, and the day total stays exact. The monthly share setting
+  is then not used; August and September keep the share method. The share is 10% (`PROJECTION_SHARE`) unless a different share is saved for that month in the
   app (Import data → Tools); no code changes per month. The October 2026 report used 7%.
 - O&M Manager: switch Actuals / Projected, plus an "Actual vs projected" table. O&M Executive:
   Actuals. Customer: Projected only, with no markers.

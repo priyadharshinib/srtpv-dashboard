@@ -100,3 +100,13 @@ PROJECTION_GROUPS = {
     "RR College": ["PV4", "PV5", "PV6"],
     "RR Hospital": ["PV7", "PV8", "PV9"],
 }
+
+# Extra "faulty reading" rule, applied ONLY to days from PEER_CHECK_FROM onwards (Oct 2026 on).
+# Earlier months (Aug, Sep 2026 and before) keep the original rule exactly.
+# Inverters in the same group sit at the same place, so they should read about the same: a reading
+# that is more than PEER_TOLERANCE_KWH away (above or below) from the group's median that day is faulty.
+# At least 3 readings in the group are needed (with only 2 there is no telling which one is wrong).
+# Edit PEER_GROUPS to change which inverters are compared with each other.
+PEER_CHECK_FROM = "2026-10-01"
+PEER_TOLERANCE_KWH = 50.0
+PEER_GROUPS = {name: list(members) for name, members in PROJECTION_GROUPS.items()}

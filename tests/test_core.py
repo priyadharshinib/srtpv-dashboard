@@ -192,7 +192,7 @@ def test_customer_averages(sample):
 
 # ---------- Actuals vs Projected view ----------
 
-from core.config import INVERTER_IDS
+from core.config import INVERTER_IDS, PROJECTION_GROUPS, PROJECTION_THRESHOLD
 from core.projection import project
 from core.views import ACTUALS, PROJECTED, apply_view, views_for
 
@@ -457,13 +457,14 @@ def test_build_period_mixed_months_keeps_date_types():
 
 
 def test_projection_share_is_per_month():
-    # 01 Oct 2026 actual readings; the October report shows PV1 348.93 and PV4 225.65 (7% share)
-    row = {"date": pd.Timestamp("2026-10-01"), "PV1": 375.19, "PV2": 379.6, "PV3": 376.82, "PV4": 0.0,
+    # The share method (months before October 2026): a saved share applies to its month only.
+    # Same readings as the 01 Oct 2026 report row (7% share: PV1 348.93, PV4 225.65), dated in September.
+    row = {"date": pd.Timestamp("2026-09-01"), "PV1": 375.19, "PV2": 379.6, "PV3": 376.82, "PV4": 0.0,
            "PV5": 429.04, "PV6": 435.9, "PV7": 403.88, "PV8": 401.55, "PV9": 421.69}
     inv = pd.DataFrame([row] * 3)
-    inv["date"] = pd.date_range("2026-10-01", periods=3)
+    inv["date"] = pd.date_range("2026-09-01", periods=3)
     inv["Total"] = inv[INVERTER_IDS].sum(axis=1)
-    out, _ = project(inv, {"2026-10": 0.07})                         # share saved in the app for October
+    out, _ = project(inv, {"2026-09": 0.07})                         # share saved in the app for that month
     assert (out.loc[0, "PV1"], out.loc[0, "PV4"]) == (348.93, 225.65)
     out2, _ = project(inv)                                           # no saved share -> default 10%
     assert out2.loc[0, "PV1"] == round(375.19 * 0.9, 2)
@@ -600,3 +601,111 @@ def test_bill_totals_fallback_uses_inverter_when_no_lt_readings():
     out, used = bill_totals_fallback(k, bills, [], empty_ht, s, e, inv, empty_lt)
     assert used == ["2026-08"] and out["site_load_kwh"] == 433420.0
     assert round(out["solar_share"], 4) == round(100000 / 433420, 4)
+
+
+# ---- peer-group rule: PV1-3 / PV4-6 / PV7-9 must be within 50 kWh of each other, from 1 Oct 2026 only ----
+
+def _day(date, **over):
+    row = {"date": pd.Timestamp(date), **{p: 300.0 for p in INVERTER_IDS}}
+    row.update(over)
+    return pd.DataFrame([row])
+
+
+def test_peer_rule_flags_an_inverter_far_from_its_group_from_october():
+    from core.projection import faulty_cells
+    oct_ = _day("2026-10-05", PV2=380.0)                 # PV1 300, PV2 380, PV3 300: PV2 is 80 above the median
+    f = faulty_cells(oct_).iloc[0]
+    assert f["PV2"] and not f["PV1"] and not f["PV3"]
+    assert not faulty_cells(_day("2026-10-05", PV2=345.0)).iloc[0].any()      # within 50: fine
+    assert faulty_cells(_day("2026-10-05", PV8=220.0)).iloc[0]["PV8"]          # PV7-9 group, 80 below
+
+
+def test_peer_rule_does_not_apply_before_october():
+    from core.projection import faulty_cells
+    for d in ("2026-08-15", "2026-09-30"):
+        assert not faulty_cells(_day(d, PV2=380.0)).iloc[0].any()             # same readings: not faulty
+    assert faulty_cells(_day("2026-10-01", PV2=380.0)).iloc[0]["PV2"]          # first day of the new rule
+
+
+def test_peer_rule_needs_three_readings_in_the_group():
+    from core.projection import faulty_cells
+    f = faulty_cells(_day("2026-10-05", PV1=float("nan"), PV2=400.0, PV3=300.0)).iloc[0]
+    assert f["PV1"] and not f["PV2"] and not f["PV3"]    # PV1 is blank (old rule); the other two are not compared
+
+
+def _month_of(year, month, days, **over):
+    return pd.concat([_day(f"{year}-{month:02d}-{d:02d}", **over) for d in range(1, days + 1)], ignore_index=True)
+
+
+def test_september_projection_is_unchanged_by_the_peer_rule():
+    from core.projection import chronic_inverters, project
+    sep = _month_of(2026, 9, 30, PV2=380.0)              # PV2 80 above its peers every day
+    sep["Total"] = sep[INVERTER_IDS].sum(axis=1)
+    assert chronic_inverters(sep)["2026-09"] == []        # old rule: nothing faulty, as before
+    out, marked = project(sep)
+    assert out[INVERTER_IDS].equals(sep[INVERTER_IDS]) and not marked.values.any()
+    octo = _month_of(2026, 10, 31, PV2=380.0)
+    octo["Total"] = octo[INVERTER_IDS].sum(axis=1)
+    assert chronic_inverters(octo)["2026-10"] == ["PV2"]  # the same readings in October are faulty
+    out, _ = project(octo)
+    assert (out[INVERTER_IDS].sum(axis=1).round(2) == octo["Total"].round(2)).all()   # day totals still unchanged
+
+
+def test_august_and_september_faulty_cells_match_the_original_rule():
+    import numpy as np
+    from core.projection import faulty_cells
+    rng = np.random.default_rng(3)
+    rows = []
+    for d in pd.date_range("2026-08-01", "2026-09-30"):
+        base = rng.uniform(100, 700)
+        r = {"date": d, **{p: base * rng.uniform(0.85, 1.15) for p in INVERTER_IDS}}
+        r[rng.choice(INVERTER_IDS)] = rng.choice([0.0, float("nan"), base + 200])
+        rows.append(r)
+    inv = pd.DataFrame(rows)
+    sib = {p: [q for g in PROJECTION_GROUPS.values() if p in g for q in g if q != p] for p in INVERTER_IDS}
+    vals = inv[INVERTER_IDS].astype(float)
+    expected = pd.DataFrame({p: vals[p].isna() | ((vals[sib[p]].mean(axis=1) > 0)
+                                                 & (vals[p] < PROJECTION_THRESHOLD * vals[sib[p]].mean(axis=1)))
+                             for p in INVERTER_IDS})
+    assert faulty_cells(inv).equals(expected)
+
+
+# ---- October 2026 on: a faulty inverter is filled to match the inverters at the same place ----
+
+def _oct_month(**over):
+    out = _month_of(2026, 10, 31, PV1=500.0, PV2=510.0, PV3=520.0, PV4=0.0, PV5=600.0, PV6=610.0,
+                    PV7=550.0, PV8=540.0, PV9=560.0)
+    for k, v in over.items():
+        out[k] = v
+    out["Total"] = out[INVERTER_IDS].sum(axis=1)
+    return out
+
+
+def test_october_faulty_inverter_is_filled_within_50_of_its_peers():
+    from core.projection import project
+    inv = _oct_month()
+    out, marked = project(inv, {"2026-10": 0.07})
+    assert (out[INVERTER_IDS].sum(axis=1).round(2) == inv["Total"].round(2)).all()       # day totals unchanged
+    assert ((out["PV4"] - out["PV5"]).abs() <= 50).all() and ((out["PV4"] - out["PV6"]).abs() <= 50).all()
+    assert marked["PV4"].all() and not marked["PV5"].any()
+    assert (out["PV4"] > 400).all()      # the old 7% share would have left it around 240
+
+
+def test_october_healthy_days_of_a_faulty_inverter_are_left_as_recorded():
+    from core.projection import project
+    pv4 = [0.0] * 20 + [585.0] * 11                      # faulty on 20 of 31 days, fine on the rest
+    inv = _oct_month(PV4=pv4)
+    out, marked = project(inv)
+    assert out.loc[25, INVERTER_IDS].equals(inv.loc[25, INVERTER_IDS]) and not marked.loc[25].any()
+    assert marked.loc[0, "PV4"] and abs(out.loc[0, "PV4"] - out.loc[0, "PV5"]) <= 50
+
+
+def test_september_still_uses_the_share_method():
+    from core.projection import project
+    sep = _month_of(2026, 9, 30, PV1=500.0, PV2=510.0, PV3=520.0, PV4=0.0, PV5=600.0, PV6=610.0,
+                    PV7=550.0, PV8=540.0, PV9=560.0)
+    sep["Total"] = sep[INVERTER_IDS].sum(axis=1)
+    out, _ = project(sep, {"2026-09": 0.10})
+    total = sep.loc[0, "Total"]
+    assert out.loc[0, "PV4"] == round(0.10 * total, 2)   # 0.9 x 0 + 10% of the day total, exactly as before
+    assert out.loc[0, "PV5"] == round(600.0 * 0.9, 2)

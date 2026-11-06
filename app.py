@@ -48,7 +48,7 @@ from core.observations import glance_headline, inverter_issues
 from core.report import bill_totals_fallback, build_period, daily_headline, day_ranges, fill_bill_lt, followups, month_list, short_weather, very_low_mask
 from core.settings import get_setting
 from core.views import PROJECTED, apply_view, views_for
-from core.projection import chronic_inverters, faulty_cells, project, share_for
+from core.projection import chronic_inverters, faulty_cells, peer_fill_month, project, share_for
 from core.billing import BILL_LT_DISCLAIMER, demand_headline, demand_pct, demand_story, ht_import_breakdown, inr
 from core.batches import ADD_NEW, ALL_MONTHS, REPLACE, REPLACE_MONTH, coverage_text, prepare_batch, split_by_month
 from core.config import CONTRACT_DEMAND_KVA, DEFAULT_EXPORT_NOTE, PROJECTION_SHARE
@@ -319,7 +319,8 @@ def import_page() -> None:
         st.caption("In the Projected view, an inverter that is faulty on most days of a month gets this share of "
                    "each day's actual total; every reading is scaled down so day totals stay the same. "
                    f"Months without a saved share use {PROJECTION_SHARE:.0%}. To match a monthly report, enter "
-                   "the share that report used (September 2026: 10%, October 2026: 7%).")
+                   "the share that report used (September 2026: 10%). From October 2026 the share is not used: a faulty "
+                   "inverter is filled to match the inverters at the same place instead.")
         shares = projection_shares()
         all_months = db.available_months() or [pd.Timestamp.today().strftime("%Y-%m")]
         s1, s2, s3 = st.columns([1, 1, 1])
@@ -469,17 +470,6 @@ with st.sidebar:
     RAW_INV = inv_all.copy()                       # actual readings, for the actual-vs-projected table
     SHARES = projection_shares()
     viewed = apply_view(inv_all, VIEW, SHARES)
-    
-
-    # TEMPORARY BYPASS: Show actual inverter readings on 03-Nov-2026
-    if VIEW != "Actual":
-        nov_3_mask = (
-            pd.to_datetime(RAW_INV["date"]).dt.date
-            == pd.Timestamp("2026-11-03").date()
-        )
-
-        for p in INVERTER_IDS:
-         viewed.loc[nov_3_mask, p] = RAW_INV.loc[nov_3_mask, p]
     if not ALL_SEL:
         viewed["Total"] = viewed[SEL].sum(axis=1, min_count=1).round(2)
     inv_all = enrich(viewed, PLANT_CAPACITY_KWP * len(SEL) / len(INVERTER_IDS))
@@ -973,8 +963,11 @@ def inverter_readings(with_filter: bool = False) -> None:
     if NODATA and not IS_CUSTOMER:
         key += "  ·  " + ", ".join(f"{d:%d %b}" for d in NODATA) + ": no data"
     if IS_PROJ and not IS_CUSTOMER and any(inv[f"proj_{p}"].any() for p in cols if f"proj_{p}" in inv):
-        key += (f"  ·  p = includes {share_for(month, SHARES):.0%} of the day's total (day totals unchanged)" if month
-                else "  ·  p = includes a share of the day's total (day totals unchanged)")
+        if month and peer_fill_month(month):
+            key += "  ·  p = filled to match the inverters at the same place (day totals unchanged)"
+        else:
+            key += (f"  ·  p = includes {share_for(month, SHARES):.0%} of the day's total (day totals unchanged)" if month
+                    else "  ·  p = includes a share of the day's total (day totals unchanged)")
     st.markdown(f'<div class="ae-key">{escape(key)}</div>', unsafe_allow_html=True)
     if month:                                   # note for the month: written by admins, read by everyone
         inv_note = db.load_inverter_note(month)
@@ -1185,9 +1178,13 @@ def actual_vs_projected() -> None:
                         "Difference kWh": (pj - a).values, "Readings projected": n.values})
     tbl.loc[len(tbl)] = ["Total", "", a.sum(), pj.sum(), pj.sum() - a.sum(), int(n.sum())]
     chronic = {m: [p for p in ps if p in SEL] for m, ps in chronic_inverters(raw).items()}
-    parts = [f"{pd.Timestamp(m + '-01'):%B}: {', '.join(ps)} faulty on most days, so each day "
-             f"{'it gets' if len(ps) == 1 else 'each gets'} {share_for(m, SHARES):.0%} of the day's actual total and "
-             f"every reading is scaled to {1 - share_for(m, SHARES) * len(ps):.0%}." for m, ps in chronic.items() if ps]
+    parts = [(f"{pd.Timestamp(m + '-01'):%B}: {', '.join(ps)} faulty on most days, so on a day its own reading is faulty "
+              f"{'it is' if len(ps) == 1 else 'each is'} filled to match the other inverters at the same place "
+              f"(within 50 kWh) and the other readings are scaled so the day total is unchanged."
+              if peer_fill_month(m) else
+              f"{pd.Timestamp(m + '-01'):%B}: {', '.join(ps)} faulty on most days, so each day "
+              f"{'it gets' if len(ps) == 1 else 'each gets'} {share_for(m, SHARES):.0%} of the day's actual total and "
+              f"every reading is scaled to {1 - share_for(m, SHARES) * len(ps):.0%}.") for m, ps in chronic.items() if ps]
     how = (" ".join(parts) + " ") if parts else "No inverter is faulty on most days, so projected equals actual. "
     h2("Actual vs projected", how + "Day and month totals are unchanged. Customers see the projected split.")
     rows = "".join(
