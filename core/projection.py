@@ -18,6 +18,11 @@ above or below the median of the inverters at the same place (PEER_GROUPS: PV1-3
 Days before that date, so August and September 2026, are judged by the original rule only and come out
 exactly as before.
 
+From November 2026 (DAILY_FILL_FROM) the rules change again, and only from that date: a reading is faulty
+when it is blank, below 70% of its siblings, or more than 50 kWh BELOW the median of its group (a high reading
+is not faulty), and there is no "faulty on half of the month" condition: every faulty reading is filled on its
+own day. October 2026 and everything before keep the rules described here exactly as they were.
+
 From October 2026 the fill itself also changes (see _fill_day_peers). On a day when a chronically faulty
 inverter's own reading is faulty, it is filled with the average of the healthy inverters at the same place
 (so it ends up within PEER_TOLERANCE_KWH of them, e.g. PV4 next to PV5 and PV6), and every other reading is
@@ -30,7 +35,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from core.config import (INVERTER_IDS, PEER_CHECK_FROM, PEER_GROUPS, PEER_TOLERANCE_KWH, PROJECTION_GROUPS,
+from core.config import (DAILY_FILL_FROM, INVERTER_IDS, PEER_CHECK_FROM, PEER_GROUPS, PEER_TOLERANCE_KWH, PROJECTION_GROUPS,
                          PROJECTION_MIN_FAULTY_DAYS, PROJECTION_SHARE, PROJECTION_THRESHOLD)
 
 
@@ -46,14 +51,17 @@ def roof_siblings() -> dict[str, list[str]]:
 
 
 def peer_outliers(inv: pd.DataFrame) -> pd.DataFrame:
-    """True where a reading is more than PEER_TOLERANCE_KWH above or below the median of the inverters at the
-    same place (PEER_GROUPS) that day. Only for days from PEER_CHECK_FROM; earlier days are always False.
+    """True where a reading is too far from the median of the inverters at the same place (PEER_GROUPS) that day.
+    October 2026 (PEER_CHECK_FROM up to DAILY_FILL_FROM): more than PEER_TOLERANCE_KWH above or below.
+    From DAILY_FILL_FROM (1 Nov 2026): more than PEER_TOLERANCE_KWH BELOW only. Earlier days: always False.
     A group needs at least 3 readings that day for the comparison to mean anything."""
     out = pd.DataFrame(False, index=inv.index, columns=INVERTER_IDS)
     if inv.empty or "date" not in inv.columns:
         return out
-    active = (pd.to_datetime(inv["date"]) >= pd.Timestamp(PEER_CHECK_FROM)).to_numpy()
-    if not active.any():
+    dates = pd.to_datetime(inv["date"])
+    daily = (dates >= pd.Timestamp(DAILY_FILL_FROM)).to_numpy()
+    active = (dates >= pd.Timestamp(PEER_CHECK_FROM)).to_numpy() & ~daily       # October: both directions
+    if not (active.any() or daily.any()):
         return out
     vals = inv[INVERTER_IDS].astype(float)
     for members in PEER_GROUPS.values():
@@ -62,7 +70,9 @@ def peer_outliers(inv: pd.DataFrame) -> pd.DataFrame:
         median = sub.median(axis=1)
         enough = (sub.notna().sum(axis=1) >= 3).to_numpy()
         for p in members:
-            out[p] = active & enough & ((sub[p] - median).abs() > PEER_TOLERANCE_KWH).to_numpy()
+            dev = sub[p] - median
+            out[p] = enough & ((active & (dev.abs() > PEER_TOLERANCE_KWH).to_numpy())
+                               | (daily & (dev < -PEER_TOLERANCE_KWH).to_numpy()))
     return out
 
 
@@ -84,6 +94,24 @@ def chronic_inverters(inv: pd.DataFrame, faulty: pd.DataFrame | None = None) -> 
     months = inv["date"].dt.strftime("%Y-%m")
     return {m: [p for p in INVERTER_IDS if faulty.loc[idx, p].mean() >= PROJECTION_MIN_FAULTY_DAYS]
             for m, idx in months.groupby(months).groups.items()}
+
+
+def daily_fill_month(month: str) -> bool:
+    """True for months that are filled day by day (November 2026 onwards)."""
+    return month >= DAILY_FILL_FROM[:7]
+
+
+def projected_inverters(inv: pd.DataFrame, faulty: pd.DataFrame | None = None) -> dict[str, list[str]]:
+    """{'2026-11': ['PV4'], ...}: the inverters that get filled in each month.
+    Up to October 2026: the chronically faulty ones (chronic_inverters), exactly as before.
+    From November 2026: every inverter that has at least one faulty day, because those days are filled one by one."""
+    faulty = faulty_cells(inv) if faulty is None else faulty
+    chronic = chronic_inverters(inv, faulty)
+    months = inv["date"].dt.strftime("%Y-%m")
+    out = {}
+    for m, idx in months.groupby(months).groups.items():
+        out[m] = [p for p in INVERTER_IDS if faulty.loc[idx, p].any()] if daily_fill_month(m) else chronic[m]
+    return out
 
 
 def peer_fill_month(month: str) -> bool:
@@ -143,7 +171,7 @@ def project(inv: pd.DataFrame, shares: dict | None = None) -> tuple[pd.DataFrame
     totals = vals.sum(axis=1, min_count=1)
     months = inv["date"].dt.strftime("%Y-%m")
     faulty = faulty_cells(inv)
-    for m, targets in chronic_inverters(inv, faulty).items():
+    for m, targets in projected_inverters(inv, faulty).items():
         if not targets:
             continue
         rows = months[months == m].index
@@ -161,6 +189,8 @@ def project(inv: pd.DataFrame, shares: dict | None = None) -> tuple[pd.DataFrame
                     for t in filled:
                         marked.at[i, t] = True
                     continue
+                if daily_fill_month(m):
+                    continue                                 # November on: no healthy peer that day, left as recorded
             new = {p: (None if pd.isna(vals.at[i, p]) else _r2(vals.at[i, p] * scale))
                    for p in INVERTER_IDS if p not in targets}
             for t in targets[:-1]:

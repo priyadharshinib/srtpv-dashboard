@@ -48,7 +48,7 @@ from core.observations import glance_headline, inverter_issues
 from core.report import bill_totals_fallback, build_period, daily_headline, day_ranges, fill_bill_lt, followups, month_list, short_weather, very_low_mask
 from core.settings import get_setting
 from core.views import PROJECTED, apply_view, views_for
-from core.projection import chronic_inverters, faulty_cells, peer_fill_month, project, share_for
+from core.projection import daily_fill_month, faulty_cells, peer_fill_month, project, projected_inverters, share_for
 from core.billing import BILL_LT_DISCLAIMER, demand_headline, demand_pct, demand_story, ht_import_breakdown, inr
 from core.batches import ADD_NEW, ALL_MONTHS, REPLACE, REPLACE_MONTH, coverage_text, prepare_batch, split_by_month
 from core.config import CONTRACT_DEMAND_KVA, DEFAULT_EXPORT_NOTE, PROJECTION_SHARE
@@ -1177,8 +1177,12 @@ def actual_vs_projected() -> None:
                         "Actual kWh": a.values, "Projected kWh": pj.values,
                         "Difference kWh": (pj - a).values, "Readings projected": n.values})
     tbl.loc[len(tbl)] = ["Total", "", a.sum(), pj.sum(), pj.sum() - a.sum(), int(n.sum())]
-    chronic = {m: [p for p in ps if p in SEL] for m, ps in chronic_inverters(raw).items()}
-    parts = [(f"{pd.Timestamp(m + '-01'):%B}: {', '.join(ps)} faulty on most days, so on a day its own reading is faulty "
+    chronic = {m: [p for p in ps if p in SEL] for m, ps in projected_inverters(raw).items()}
+    parts = [(f"{pd.Timestamp(m + '-01'):%B}: {', '.join(ps)} had faulty readings on some days, so on those days "
+              f"{'it is' if len(ps) == 1 else 'each is'} filled to match the other inverters at the same place "
+              f"and the other readings are scaled so the day total is unchanged."
+              if daily_fill_month(m) else
+              f"{pd.Timestamp(m + '-01'):%B}: {', '.join(ps)} faulty on most days, so on a day its own reading is faulty "
               f"{'it is' if len(ps) == 1 else 'each is'} filled to match the other inverters at the same place "
               f"(within 50 kWh) and the other readings are scaled so the day total is unchanged."
               if peer_fill_month(m) else

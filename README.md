@@ -73,7 +73,12 @@ All roles see the same dashboard. Only PV1–PV9 values differ between views.
   Also from October 2026 the fill changes: on a day when such an inverter's own reading is faulty it is
   filled with the average of the healthy inverters at the same place (so PV4 lands within 50 kWh of PV5 and
   PV6), the other readings are scaled by one factor, and the day total stays exact. The monthly share setting
-  is then not used; August and September keep the share method. The share is 10% (`PROJECTION_SHARE`) unless a different share is saved for that month in the
+  is then not used; August and September keep the share method.
+  **From 1 Nov 2026 only** (`DAILY_FILL_FROM`) it works day by day: a reading is faulty when it is blank,
+  below 70% of its siblings, or more than 50 kWh *below* the median of its group (a high reading is not
+  faulty). Every faulty reading is filled on its own day, with no "half of the month" condition, from the
+  healthy inverters at the same place; the other readings are scaled so each day's total is unchanged.
+  August, September and October 2026 are not affected. The share is 10% (`PROJECTION_SHARE`) unless a different share is saved for that month in the
   app (Import data → Tools); no code changes per month. The October 2026 report used 7%.
 - O&M Manager: switch Actuals / Projected, plus an "Actual vs projected" table. O&M Executive:
   Actuals. Customer: Projected only, with no markers.

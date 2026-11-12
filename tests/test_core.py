@@ -709,3 +709,49 @@ def test_september_still_uses_the_share_method():
     total = sep.loc[0, "Total"]
     assert out.loc[0, "PV4"] == round(0.10 * total, 2)   # 0.9 x 0 + 10% of the day total, exactly as before
     assert out.loc[0, "PV5"] == round(600.0 * 0.9, 2)
+
+
+# ---- from 1 Nov 2026: faulty = well BELOW its siblings, filled day by day; October and earlier unchanged ----
+
+_PEERS = dict(PV1=400.0, PV2=410.0, PV3=420.0, PV5=455.0, PV6=465.0, PV7=420.0, PV8=410.0, PV9=430.0)
+
+
+def _pattern_month(year, month, pv4):
+    out = pd.concat([_day(f"{year}-{month:02d}-{d:02d}", PV4=v, **_PEERS) for d, v in enumerate(pv4, 1)],
+                    ignore_index=True)
+    out["Total"] = out[INVERTER_IDS].sum(axis=1)
+    return out
+
+
+def test_november_fills_each_faulty_day_even_when_only_a_few_days_are_faulty():
+    from core.projection import project
+    inv = _pattern_month(2026, 11, [0.0, 174.71, 150.36, 0.0, 313.67] + [450.0] * 6)       # 5 of 11 days
+    out, marked = project(inv)
+    assert marked["PV4"].tolist() == [True] * 5 + [False] * 6
+    assert ((out["PV4"] - out["PV5"]).abs()[:5] <= 50).all() and ((out["PV4"] - out["PV6"]).abs()[:5] <= 50).all()
+    assert out.loc[5:, INVERTER_IDS].equals(inv.loc[5:, INVERTER_IDS])                     # healthy days untouched
+    assert (out[INVERTER_IDS].sum(axis=1).round(2) == inv["Total"].round(2)).all()          # day totals unchanged
+
+
+def test_october_keeps_the_half_the_month_condition():
+    from core.projection import project
+    inv = _pattern_month(2026, 10, [0.0, 174.71, 150.36, 0.0, 313.67] + [450.0] * 6)       # same pattern in October
+    out, marked = project(inv)
+    assert out[INVERTER_IDS].equals(inv[INVERTER_IDS]) and not marked.values.any()
+
+
+def test_november_only_low_readings_are_faulty():
+    from core.projection import faulty_cells
+    high = faulty_cells(_day("2026-11-05", PV2=480.0)).iloc[0]            # 80 above PV1 / PV3
+    assert not high.any()
+    assert faulty_cells(_day("2026-10-05", PV2=380.0)).iloc[0]["PV2"]      # October still flags a high reading
+    low = faulty_cells(_day("2026-11-05", PV2=220.0)).iloc[0]             # 80 below
+    assert low["PV2"] and not low["PV1"] and not low["PV3"]
+    assert not faulty_cells(_day("2026-11-05", PV2=265.0)).iloc[0].any()  # 35 below: within 50
+
+
+def test_november_rules_do_not_reach_back_into_october():
+    from core.projection import faulty_cells
+    oct31 = faulty_cells(_day("2026-10-31", PV2=380.0)).iloc[0]
+    nov01 = faulty_cells(_day("2026-11-01", PV2=380.0)).iloc[0]
+    assert oct31["PV2"] and not nov01["PV2"]

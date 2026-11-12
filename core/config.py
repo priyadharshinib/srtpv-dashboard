@@ -110,3 +110,12 @@ PROJECTION_GROUPS = {
 PEER_CHECK_FROM = "2026-10-01"
 PEER_TOLERANCE_KWH = 50.0
 PEER_GROUPS = {name: list(members) for name, members in PROJECTION_GROUPS.items()}
+
+# Day-by-day fill, ONLY from DAILY_FILL_FROM (1 Nov 2026) onwards. October, September and August keep exactly
+# the rules above. From this date:
+#   - a reading is faulty when it is blank, below PROJECTION_THRESHOLD x its siblings' average, or more than
+#     PEER_TOLERANCE_KWH BELOW the median of the inverters at the same place (a high reading is not faulty);
+#   - every faulty reading is filled on its own day with the average of the healthy inverters at the same
+#     place (no "faulty on half of the month" condition), and the other readings are scaled by one factor so
+#     the day total never changes.
+DAILY_FILL_FROM = "2026-11-01"
